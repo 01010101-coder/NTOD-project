@@ -68,6 +68,24 @@ class Fleet:
             for i in range(count)
         ]
 
+    def nearest_free(self, zone: int, path_row: np.ndarray) -> int | None:
+        """Свободный водитель с минимальным временем подачи; при равенстве — меньший id (§3.5).
+
+        Один проход по водителям по возрастанию ``id``; время подачи водителя
+        есть ``path_row[driver.zone]`` — строка матрицы кратчайших путей для
+        зоны посадки ``zone``. Кандидат лучше только при строгом ``<`` — при
+        равенстве остаётся водитель с меньшим ``id``. Свободных нет — ``None``.
+        """
+        best_id: int | None = None
+        best_time = math.inf
+        for driver in self._drivers:
+            if driver.state is not DriverState.FREE:
+                continue
+            candidate = int(path_row[driver.zone])
+            if candidate < best_time:
+                best_id, best_time = driver.id, candidate
+        return best_id
+
     def free_by_zone(self) -> np.ndarray:
         """Число свободных водителей по зонам: массив длины Z, dtype int (снапшот §3.8)."""
         counts = np.zeros(self._zone_count, dtype=int)

@@ -9,7 +9,7 @@
 
 ## 3. Диспатч (§3.5)
 
-- [ ] 3.1 Реализовать `nearest_free(zone, path_row) -> int | None`: один проход по водителям по возрастанию `id`, только состояние `FREE`; кандидат — строго меньшее `path_row[driver.zone]` (строгое `<` сохраняет первого при равенстве → меньший `id`); свободных нет → `None` (design.md, решение 5; спека «Диспатч»). Проверка: `.venv/bin/python -c "import numpy as np; from simulator.drivers import Fleet; f = Fleet(4, 6); assert f.nearest_free(0, np.array([7, 7, 9, 9, 9, 9])) == 0 and f.nearest_free(0, np.array([9, 7, 7, 9, 9, 9])) == 1 and f.nearest_free(0, np.array([99, 99, 99, 99, 99, 99])) == 0 and Fleet(0, 6).nearest_free(0, np.array([1, 1, 1, 1, 1, 1])) is None"` выполняется без ошибки
+- [x] 3.1 Реализовать `nearest_free(zone, path_row) -> int | None`: один проход по водителям по возрастанию `id`, только состояние `FREE`; кандидат — строго меньшее `path_row[driver.zone]` (строгое `<` сохраняет первого при равенстве → меньший `id`); свободных нет → `None` (design.md, решение 5; спека «Диспатч»). Проверка: `.venv/bin/python -c "import numpy as np; from simulator.drivers import Fleet; f = Fleet(4, 6); assert f.nearest_free(0, np.array([7, 7, 9, 9, 9, 9])) == 0 and f.nearest_free(0, np.array([9, 7, 7, 9, 9, 9])) == 1 and f.nearest_free(0, np.array([99, 99, 99, 99, 99, 99])) == 0 and Fleet(0, 6).nearest_free(0, np.array([1, 1, 1, 1, 1, 1])) is None"` выполняется без ошибки
 
 ## 4. Движение и высадка (§3.7 шаг 4, §3.5)
 
