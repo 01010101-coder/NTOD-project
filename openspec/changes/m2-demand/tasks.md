@@ -20,6 +20,6 @@
 
 ## 4. Итоговые прогоны: make lint и make test
 
-- [ ] 4.1 Прогнать `make lint` (ruff lint + format по конфигу репо) на новом `simulator/demand.py` и `tests/test_sim_demand.py`. Проверка: `make lint` — exit 0 (гейт A1)
-- [ ] 4.2 Прогнать `make test` — весь набор, включая M1-тесты и `tests/test_sim_city.py` без правок существующих файлов (change добавляет только два файла; запрет §2.2 п. 1). Проверка: `make test` — exit 0 (гейт A2)
-- [ ] 4.3 Проверить импорты публичного API demand по гейту A12 (§11.1 плана M2). Проверка: `.venv/bin/python -c "from simulator.demand import TripRequest, lambda_rate, spawn_requests; assert callable(lambda_rate) and callable(spawn_requests)"` выполняется без ошибки. Примечание: полный `make accept-m2` на этом change'е невыполним — цель и `scripts/accept_m2.sh` ставятся `m2-loop` (§7 плана M2, приложение В); прогон со сдачей возможен только после `m2-loop`
+- [x] 4.1 Прогнать `make lint` (ruff lint + format по конфигу репо) на новом `simulator/demand.py` и `tests/test_sim_demand.py`. Проверка: `make lint` — exit 0 (гейт A1)
+- [x] 4.2 Прогнать `make test` — весь набор, включая M1-тесты и `tests/test_sim_city.py` без правок существующих файлов (change добавляет только два файла; запрет §2.2 п. 1). Проверка: `make test` — exit 0 (гейт A2)
+- [x] 4.3 Проверить импорты публичного API demand по гейту A12 (§11.1 плана M2). Проверка: `.venv/bin/python -c "from simulator.demand import TripRequest, lambda_rate, spawn_requests; assert callable(lambda_rate) and callable(spawn_requests)"` выполняется без ошибки. Примечание: полный `make accept-m2` на этом change'е невыполним — цель и `scripts/accept_m2.sh` ставятся `m2-loop` (§7 плана M2, приложение В); прогон со сдачей возможен только после `m2-loop`
