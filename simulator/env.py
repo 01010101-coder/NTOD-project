@@ -48,33 +48,36 @@ class WorldEnv:
         """Сохранить конфигурацию и генератор; сутки стартуют без эпизодов."""
         self._cfg = cfg
         self._rng = rng
-        # Эпизод дождя: абсолютный интервал [начало, конец); None — дождя нет.
-        self._rain_start: datetime | None = None
-        self._rain_end: datetime | None = None
-        # Surge-инъекция: зона, абсолютное окно [начало, конец) и множитель;
-        # None — инъекции нет (тариф всюду 1.0, §3.6).
-        self._surge_zone: int | None = None
-        self._surge_start: datetime | None = None
-        self._surge_end: datetime | None = None
-        self._surge_mult: float = 1.0
+        # Живые эпизоды дождя — абсолютные интервалы [начало, конец)
+        # сим-времени: хвост эпизода предыдущих суток, перешедший через
+        # полночь, и эпизод разыгранных суток (решение 6 design.md).
+        self._rain_spans: list[tuple[datetime, datetime]] = []
+        # Живые окна surge-инъекций — та же логика абсолютных интервалов;
+        # запись (начало, конец, зона, множитель); тариф всюду 1.0 вне окон
+        # (§3.6). При пересечении хвоста и нового окна одной зоны приоритет
+        # у окна разыгранных суток — запросы читают список с конца.
+        self._surges: list[tuple[datetime, datetime, int, float]] = []
 
     def advance_day(self, day_index: int) -> None:
         """Перейти на сутки ``day_index`` (выполняется в 00:00 сим-суток).
 
         Дата суток = ``engine.sim_start`` + ``day_index`` суток, день недели
-        Mon=0 (решение 7 design.md). Состояние эпизодов не наследуется от
-        предыдущих суток: каждый вызов начинает сутки с пустой среды и
-        выполняет розыгрыши §3.6 в фиксированном порядке — дождь, затем
-        инъекция; Бернулли — ``rng.random() < шанс``, при неуспехе параметры
-        эпизода не разыгрываются (безусловность §10.13 — независимость от
-        решений потребителя тарифа, а не от исхода Бернулли).
+        Mon=0 (решение 7 design.md). Розыгрыши §3.6 выполняются в фиксированном
+        порядке — дождь, затем инъекция; Бернулли — ``rng.random() < шанс``,
+        при неуспехе параметры эпизода не разыгрываются (безусловность §10.13 —
+        независимость от решений потребителя тарифа, а не от исхода Бернулли).
+        Хвосты эпизодов предыдущих суток, перешедшие через полночь, сохраняются
+        — «розыгрыш следующего дня этого не меняет» (решение 6 design.md);
+        интервалы, закончившиеся до начала новых суток, удаляются.
         """
         day_start = _parse_day_start(self._cfg.engine.sim_start) + timedelta(days=day_index)
+        # Хвосты предыдущих суток: интервалы, ещё не закончившиеся к 00:00
+        # новых суток, остаются живыми, остальные удаляются.
+        self._rain_spans = [span for span in self._rain_spans if span[1] > day_start]
+        self._surges = [surge for surge in self._surges if surge[1] > day_start]
         # Дождь: Bernoulli; при успехе — эпизод с целым часом старта по
         # замкнутому диапазону конфига и целой длительностью в часах; интервал
         # от 00:00 суток, без усечения полуночью (решение 6 design.md).
-        self._rain_start = None
-        self._rain_end = None
         weather = self._cfg.weather
         if self._rng.random() < weather.rain_day_chance:
             start_h = int(
@@ -83,46 +86,67 @@ class WorldEnv:
             duration_h = int(
                 self._rng.integers(weather.episode_duration_h[0], weather.episode_duration_h[1] + 1)
             )
-            self._rain_start = day_start + timedelta(hours=start_h)
-            self._rain_end = self._rain_start + timedelta(hours=duration_h)
+            rain_start = day_start + timedelta(hours=start_h)
+            self._rain_spans.append((rain_start, rain_start + timedelta(hours=duration_h)))
         # Surge-инъекция: Bernoulli; при успехе — зона, целая минута старта
         # («U(сутки)»), длительность в минутах и множитель; розыгрыш выполняется
         # после дождя — порядок §3.6 (решение 6 design.md).
-        self._surge_zone = None
-        self._surge_start = None
-        self._surge_end = None
-        self._surge_mult = 1.0
         injection = self._cfg.pricing.surge_injection
         if self._rng.random() < injection.day_chance:
-            self._surge_zone = int(self._rng.integers(0, len(self._cfg.city.zones)))
+            zone_id = int(self._rng.integers(0, len(self._cfg.city.zones)))
             start_min = int(self._rng.integers(0, 1440))  # «U(сутки)»: минута 0..1439
             duration_min = int(
                 self._rng.integers(injection.duration_min[0], injection.duration_min[1] + 1)
             )
-            self._surge_start = day_start + timedelta(minutes=start_min)
-            self._surge_end = self._surge_start + timedelta(minutes=duration_min)
-            self._surge_mult = float(
-                self._rng.uniform(injection.multiplier[0], injection.multiplier[1])
+            surge_start = day_start + timedelta(minutes=start_min)
+            self._surges.append(
+                (
+                    surge_start,
+                    surge_start + timedelta(minutes=duration_min),
+                    zone_id,
+                    float(self._rng.uniform(injection.multiplier[0], injection.multiplier[1])),
+                )
             )
 
     def is_rain(self, t: datetime) -> bool:
-        """Сообщить, идёт ли дождь в момент ``t``; ``rng`` не тратит."""
-        # Заглушка каркаса: эпизод заполняется суточным розыгрышем advance_day.
-        return False
+        """Сообщить, идёт ли дождь в момент ``t``; ``rng`` не тратит.
+
+        Истинен внутри абсолютного интервала живого эпизода
+        ``[начало, конец)``, включая минуты после полуночи, если эпизод
+        перешёл через неё (решение 6 design.md).
+        """
+        return any(start <= t < end for start, end in self._rain_spans)
 
     def event_label(self, zone: ZoneInfo, t: datetime) -> str:
         """Метка события зоны ``zone`` в момент ``t`` по правилу колонки ``event`` (§3.8).
 
         «Первое сработавшее»: ``'friday_evening'`` | ``'surge_injection'`` | ``''``.
+        Календарная часть вычисляется из самой метки запроса ``t`` (решение 7
+        design.md), инъекция — по абсолютным окнам зоны ``zone.id``.
         """
-        # Заглушка каркаса: календарь и инъекция — состояние суток и конфиг.
+        friday = self._cfg.events.friday_evening
+        if (
+            t.weekday() in friday.days
+            and friday.hours[0] <= t.hour <= friday.hours[1]
+            and zone.archetype in friday.archetypes
+        ):
+            return "friday_evening"
+        if any(
+            surge_zone == zone.id and start <= t < end
+            for start, end, surge_zone, _mult in self._surges
+        ):
+            return "surge_injection"
         return ""
 
     def price_multiplier(self, zone_id: int, t: datetime) -> float:
         """Множитель тарифа зоны ``zone_id`` в момент ``t``; ``rng`` не тратит.
 
         «Всюду 1.0, кроме обучающих инъекций» (§3.6): дождь и «пятничный
-        вечер» тариф не меняют.
+        вечер» тариф не меняют. Окна читаются с конца списка: при пересечении
+        хвоста предыдущих суток и нового окна одной зоны действует окно
+        разыгранных суток.
         """
-        # Заглушка каркаса: окно инъекции заполняется розыгрышем advance_day.
+        for start, end, surge_zone, mult in reversed(self._surges):
+            if surge_zone == zone_id and start <= t < end:
+                return mult
         return 1.0
