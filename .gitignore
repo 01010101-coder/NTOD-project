@@ -1,0 +1,26 @@
+# Виртуальное окружение
+.venv/
+
+# Данные симуляции, базы и экспорт
+data/
+*.sqlite
+
+# Кеши Python и инструментов
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# Отчёты
+reports/
+
+# Артефакты обучения (scaler, checkpoint, история)
+artifacts/
+
+# Служебные файлы macOS
+.DS_Store
+.opencode/queue/logs/
+.opencode/queue/verify/
+.opencode/queue/__pycache__/
+.worktrees/
+*.egg-info/
+.zcode/workflow-drafts/

@@ -1,0 +1,47 @@
+# Метаданные проекта (PEP 621) и конфигурация инструментов — change m1-tooling.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taxi-demand-forecast"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pydantic>=2",
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+# Пакеты верхнего уровня перечислены явно: автообнаружение setuptools в
+# flat-layout падает при нескольких пакетах («Multiple top-level packages
+# discovered»); каталог tests/ пакетом дистрибутива не является.
+[tool.setuptools]
+packages = ["common", "storage", "simulator"]
+
+# Линтер и форматтер: длина строки 100, правила E, F, I, W, UP (план M1 §7.6).
+[tool.ruff]
+line-length = 100
+# Служебные скрипты оркестрации (.opencode) — не код проекта, не линтимся.
+# Markdown — нормативные документы (планы, design change'ов): python-код-блоки
+# в них цитируются дословно и ruff format'у не принадлежат (решение владельца
+# прогона m2-city: иначе цитаты приложения Б роняют make lint).
+extend-exclude = [".opencode", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+
+# Форматирование кода — ruff format (цель make fmt); настройки по умолчанию.
+[tool.ruff.format]
+
+# pytest: тесты собираются из каталога tests/ (по файлу на модуль).
+[tool.pytest.ini_options]
+testpaths = ["tests"]

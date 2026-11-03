@@ -1,0 +1,32 @@
+# Continuous integration: установка, линтер и тесты на каждый push и pull request.
+# make install ставит проект с extras dev, ml и app — этого достаточно для
+# lint и полного набора тестов; кеш pip считается по хешу pyproject.toml.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Клонировать репозиторий
+        uses: actions/checkout@v4
+
+      - name: Настроить Python 3.11 с кешем pip
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Установка проекта и зависимостей
+        run: make install
+
+      - name: Проверка линтером и форматтером
+        run: make lint
+
+      - name: Тесты
+        run: make test

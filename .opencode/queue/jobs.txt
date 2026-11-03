@@ -1,0 +1,19 @@
+# apply <change> [после: dep, dep]. Порядок строк = приоритет.
+# Конвейер: propose (Claude, Opus) -> apply (эта очередь, deepseek flash) -> verify (Claude, Opus) -> archive.
+# Зависимость `verify X` = verify/X.md с «ВЕРДИКТ: PASS» или X в архиве; apply сам ждёт tasks.md.
+# Строки для ещё не написанных спек добавляются после propose.
+
+apply add-driver-supply-simulation
+apply add-dataset-preparation
+apply add-streamlit-dashboard-skeleton
+apply add-simulation-events              после: verify add-driver-supply-simulation
+apply add-simulation-engine-and-export   после: verify add-simulation-events
+apply add-zone-metrics-aggregation       после: verify add-simulation-engine-and-export
+apply add-lstm-forecaster                после: verify add-dataset-preparation
+apply add-baseline-models              после: verify add-dataset-preparation
+apply add-inference-service            после: verify add-lstm-forecaster
+apply add-city-zone-map                после: verify add-streamlit-dashboard-skeleton
+apply add-model-evaluation             после: verify add-baseline-models, verify add-lstm-forecaster
+apply add-surge-pricing-policy         после: verify add-simulation-engine-and-export, verify add-zone-metrics-aggregation, verify add-inference-service
+apply add-forecast-vs-actual-charts    после: verify add-model-evaluation, verify add-inference-service, verify add-city-zone-map
+apply add-time-control-panel           после: verify add-zone-metrics-aggregation, verify add-inference-service, verify add-surge-pricing-policy, verify add-forecast-vs-actual-charts, verify add-city-zone-map, verify add-simulation-engine-and-export

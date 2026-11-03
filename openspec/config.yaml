@@ -1,0 +1,51 @@
+schema: spec-driven
+
+context: |
+  Проект: «Предиктивное управление спросом и ценой в такси» (учебный сквозной проект).
+  Документы: docs/development-plan.md (план, контракт данных, список changes C01–C19),
+  docs/сквозной проект спецификация (1).pdf (исходное ТЗ).
+
+  Стек: Python 3.11+, numpy, pandas, pydantic v2, PyYAML, SQLite (модуль sqlite3),
+  matplotlib для отладочных графиков. Позже: PyTorch, scikit-learn, streamlit, plotly.
+  Инструменты: ruff (lint + format), pytest. Виртуальное окружение — .venv в корне проекта.
+
+  Структура пакетов (в корне проекта, без src/):
+    common/    — загрузка config.yaml (pydantic-модели), логирование, общие типы времени
+    storage/   — SQLite-схема и слой доступа, экспорт CSV
+    simulator/ — модель города, генерация спроса, водители, события, цикл симуляции
+    ml/        — подготовка данных, модели, обучение, инференс (позже)
+    app/       — Streamlit-дашборд (позже)
+    tests/     — pytest, по файлу на модуль
+
+  Контракт данных (раздел 2 плана):
+    - шаг агрегации 5 минут; горизонт прогноза 15 и 30 минут;
+    - trips(trip_id, created_at, origin_zone, dest_zone, assigned_at, pickup_at,
+      dropoff_at, status in {completed, cancelled, unfulfilled}, price_multiplier);
+    - zone_metrics_5min(ts, zone_id, requests, completed, unfulfilled, free_drivers,
+      busy_drivers, avg_wait_min, supply_demand_ratio, is_rain, event, price_multiplier);
+    - forecasts(ts, zone_id, horizon_min, pred_requests, pred_free_drivers,
+      deficit_prob, model_version);
+    - дефицит: free_drivers / max(requests, 1) < порог (по умолчанию 0.5) или unfulfilled > 0.
+  Время — наивный datetime с точностью до минуты, в БД хранится как текст ISO 8601
+  "YYYY-MM-DD HH:MM:SS". Районы идентифицируются целым zone_id от 0.
+
+  Соглашения:
+    - все параметры (районы, профили, водители, события, пороги, seed) — в config.yaml;
+      каждая новая секция конфига имеет значения по умолчанию, чтобы старые конфиги грузились;
+    - вся случайность — через numpy.random.Generator, создаваемый из seed; одинаковый seed
+      даёт одинаковый результат;
+    - комментарии и docstring на русском, идентификаторы на английском;
+    - каждый модуль покрыт тестами; make test и make lint должны проходить.
+
+rules:
+  tasks:
+    - Каждая задача указывает, как проверить её выполнение (тест, команда или наблюдаемый результат)
+    - Последняя группа задач — прогон make lint и make test
+
+operations:
+  apply:
+    guidance:
+      - Использовать .venv проекта (.venv/bin/python, .venv/bin/pytest)
+      - Отмечать задачу [x] в tasks.md сразу после её выполнения и проверки
+      - Не трогать файлы вне каталога проекта skvoznoi_project
+      - Не делать git commit и git push
