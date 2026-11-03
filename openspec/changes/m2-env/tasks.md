@@ -26,5 +26,5 @@
 
 ## 5. Итоговые прогоны: make lint и make test
 
-- [ ] 5.1 Прогнать `make lint` (ruff lint + format по конфигу репо) на новом `simulator/env.py` и `tests/test_sim_env.py`. Проверка: `make lint` — exit 0 (компонент гейта A1)
-- [ ] 5.2 Прогнать `make test` — весь набор, включая M1-тесты и `tests/test_sim_city.py` (их правки списком файлов change'а не предусмотрены) и новый `tests/test_sim_env.py`. Проверка: `make test` — exit 0 (компонент гейта A2); по правилу `openspec/config.yaml` change завершён; полный `make accept-m2` (A1–A13) — гейт конца вехи после `m2-loop` (§7 плана M2)
+- [x] 5.1 Прогнать `make lint` (ruff lint + format по конфигу репо) на новом `simulator/env.py` и `tests/test_sim_env.py`. Проверка: `make lint` — exit 0 (компонент гейта A1)
+- [x] 5.2 Прогнать `make test` — весь набор, включая M1-тесты и `tests/test_sim_city.py` (их правки списком файлов change'а не предусмотрены) и новый `tests/test_sim_env.py`. Проверка: `make test` — exit 0 (компонент гейта A2); по правилу `openspec/config.yaml` change завершён; полный `make accept-m2` (A1–A13) — гейт конца вехи после `m2-loop` (§7 плана M2)
