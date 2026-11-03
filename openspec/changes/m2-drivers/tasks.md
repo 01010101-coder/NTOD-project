@@ -26,5 +26,5 @@
 
 ## 6. Итоговые прогоны: make lint и make test
 
-- [ ] 6.1 Прогнать `make lint` (ruff lint + format по конфигу репо) на новом `simulator/drivers.py` и `tests/test_sim_drivers.py`. Проверка: `make lint` — exit 0 (гейт A1)
-- [ ] 6.2 Прогнать `make test` — весь набор, включая M1/M2-тесты (`tests/test_sim_city.py` и остальные) и новый `tests/test_sim_drivers.py`; других правок кода нет, поэтому прежние тесты обязаны остаться зелёными. Проверка: `make test` — exit 0 (гейт A2); по гейтам §7 плана M2 критерии A1 и A2 остаются зелёными (полный `make accept-m2` — после `m2-loop`)
+- [x] 6.1 Прогнать `make lint` (ruff lint + format по конфигу репо) на новом `simulator/drivers.py` и `tests/test_sim_drivers.py`. Проверка: `make lint` — exit 0 (гейт A1)
+- [x] 6.2 Прогнать `make test` — весь набор, включая M1/M2-тесты (`tests/test_sim_city.py` и остальные) и новый `tests/test_sim_drivers.py`; других правок кода нет, поэтому прежние тесты обязаны остаться зелёными. Проверка: `make test` — exit 0 (гейт A2); по гейтам §7 плана M2 критерии A1 и A2 остаются зелёными (полный `make accept-m2` — после `m2-loop`)
