@@ -5,7 +5,7 @@
 
 ## 2. Формула длительности (§3.2, §10.5)
 
-- [ ] 2.1 Добавить функцию уровня модуля `travel_minutes(path_min: int, k: float) -> int = max(1, ceil(path_min × k))` через `math.ceil` (design.md, решение 3; вопрос 4 proposal.md — предлагаемое имя). Проверка: `.venv/bin/python -c "from simulator.drivers import travel_minutes; assert travel_minutes(9, 1.4) == 13 and travel_minutes(9, 1.0) == 9 and travel_minutes(0, 1.4) == 1 and travel_minutes(15, 1.0) == 15"` выполняется без ошибки
+- [x] 2.1 Добавить функцию уровня модуля `travel_minutes(path_min: int, k: float) -> int = max(1, ceil(path_min × k))` через `math.ceil` (design.md, решение 3; вопрос 4 proposal.md — предлагаемое имя). Проверка: `.venv/bin/python -c "from simulator.drivers import travel_minutes; assert travel_minutes(9, 1.4) == 13 and travel_minutes(9, 1.0) == 9 and travel_minutes(0, 1.4) == 1 and travel_minutes(15, 1.0) == 15"` выполняется без ошибки
 
 ## 3. Диспатч (§3.5)
 
