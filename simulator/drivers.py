@@ -67,6 +67,11 @@ class Fleet:
             )
             for i in range(count)
         ]
+        # Приватный канал сведений о поездке (design.md, решение 6): план
+        # (зона назначения, длительность) на водителя, заполняется движком
+        # при назначении через _plan_trip; публичные сигнатуры Б и поля
+        # Driver не расширяются.
+        self._trip_plans: dict[int, tuple[int, int]] = {}
 
     def nearest_free(self, zone: int, path_row: np.ndarray) -> int | None:
         """Свободный водитель с минимальным временем подачи; при равенстве — меньший id (§3.5).
@@ -85,6 +90,60 @@ class Fleet:
             if candidate < best_time:
                 best_id, best_time = driver.id, candidate
         return best_id
+
+    def assign(self, driver_id: int, trip_id: int, pickup_min: int) -> None:
+        """Назначить свободному водителю заказ (§3.5): to_pickup, trip_id, remaining_min.
+
+        ``remaining_min = pickup_min`` — время подачи, посчитанное движком по
+        ``travel_minutes``; занятый водитель больше не возвращается
+        ``nearest_free`` и числится ``busy_by_zone()`` в зоне, где был свободен.
+        """
+        driver = self._drivers[driver_id]
+        driver.state = DriverState.TO_PICKUP
+        driver.trip_id = trip_id
+        driver.remaining_min = pickup_min
+
+    def _plan_trip(self, driver_id: int, dest: int, trip_min: int) -> None:
+        """Сообщить парку план поездки: зона назначения и длительность (приватный канал).
+
+        Заполняется движком сразу после ``assign``: приложение Б не несёт ни
+        зону назначения заказа (нужна ``tick()`` для высадки), ни длительность
+        поездки (нужна как ``remaining_min`` в ``ON_TRIP``); публичные
+        сигнатуры Б и поля ``Driver`` не расширяются (design.md, решение 6).
+        """
+        self._trip_plans[driver_id] = (dest, trip_min)
+
+    def tick(self) -> list[tuple[int, int]]:
+        """Одна сим-минута (§3.7 шаг 4): тики счётчиков, посадки и высадки занятых.
+
+        Один проход по занятым по возрастанию ``id``, ``remaining_min -= 1``;
+        исчерпание у ``TO_PICKUP`` — посадка (``ON_TRIP``), у ``ON_TRIP`` —
+        высадка: ``FREE``, зона = зона назначения из плана поездки, ``trip_id
+        = None``. Переход ровно один за тик (правило «минимум 1 минута»,
+        §10.5): у только что пересевшего в машину счётчик >= 1 и в этом же
+        тике не уменьшается второй раз. Возвращает высадки минуты — пары
+        ``(driver_id, зона_высадки)`` по возрастанию ``driver_id``.
+        """
+        dropoffs: list[tuple[int, int]] = []
+        for driver in self._drivers:
+            if driver.state is DriverState.FREE:
+                continue
+            driver.remaining_min -= 1
+            if driver.remaining_min > 0:
+                continue
+            if driver.state is DriverState.TO_PICKUP:
+                # Посадка: длительность поездки берётся из плана, не тикает в этом же вызове.
+                driver.state = DriverState.ON_TRIP
+                driver.remaining_min = self._trip_plans[driver.id][1]
+            else:
+                # Высадка: водитель свободен в зоне назначения заказа (§3.5).
+                dest = self._trip_plans.pop(driver.id)[0]
+                driver.state = DriverState.FREE
+                driver.zone = dest
+                driver.trip_id = None
+                driver.remaining_min = 0
+                dropoffs.append((driver.id, dest))
+        return dropoffs
 
     def free_by_zone(self) -> np.ndarray:
         """Число свободных водителей по зонам: массив длины Z, dtype int (снапшот §3.8)."""
