@@ -251,7 +251,7 @@ M1 реализовал скелет конфига, часть ключей к�
 |---|---------------|----------|
 | A1 | `make lint` | exit 0 |
 | A2 | `make test` | exit 0, все тесты §8 зелёные |
-| A3 | состав `simulator/` | ровно 9 файлов приложения Б (`__init__, city, env, demand, drivers, aggregate, engine, __main__, calibrate`), ничего лишнего |
+| A3 | состав `simulator/` | ровно 9 файлов приложения Б (`__init__, city, env, demand, drivers, aggregate, engine, __main__, calibrate`), ничего лишнего; учитываются только `*.py` — служебные `__pycache__`/`.DS_Store` игнорируются |
 | A4 | генерация 30 дней, `--seed 42`, `--csv` | exit 0; сводка — ровно 4 строки формата §4; `wall` ≤ 60 с; в stderr ≥ 24 строк прогресса машинного формата |
 | A5 | наполнение БД | `zone_metrics_5min` = 51 840 строк и 8 640 уникальных `ts`; `zone_id` в 0–5; `trips` > 0; есть и `completed`, и `unfulfilled`; других статусов нет; `forecasts` = 0 |
 | A6 | инварианты данных | 0 строк с нарушением порядка `created_at ≤ assigned_at ≤ pickup_at ≤ dropoff_at`, доменов статусов или окна `created_at` ⊂ [2026-11-02, 2026-12-02); во всех строках `supply_demand_ratio = free_drivers / max(requests, 1)` |
@@ -505,8 +505,10 @@ if make lint > /dev/null 2>&1; then ok A1 "make lint"; else bad A1 "make lint"; 
 if make test > /dev/null 2>&1; then ok A2 "make test"; else bad A2 "make test"; fi
 
 # --- A3: состав пакета simulator/ ровно из приложения Б --------------------
+# Учитываются только *.py: служебные __pycache__/.DS_Store (появляются после make test)
+# состав модулей не меняют и проверку ронять не должны.
 expected="__init__.py __main__.py aggregate.py calibrate.py city.py demand.py drivers.py engine.py env.py"
-actual=$(ls simulator | sort | tr '\n' ' ' | sed 's/ $//')
+actual=$(ls simulator/*.py | sed 's|simulator/||' | sort | tr '\n' ' ' | sed 's/ $//')
 if [ "$actual" = "$expected" ]; then
     ok A3 "состав simulator/ = приложение Б"
 else
