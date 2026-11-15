@@ -135,9 +135,6 @@ make lint           # ruff check и ruff format --check
 make fmt            # автоформатирование
 ```
 
-CI в GitHub Actions (`.github/workflows/ci.yml`) на каждый push запускает
-`make install`, `make lint` и `make test`.
-
 ## Конфигурация
 
 Все параметры мира, моделей и политик задаются в `config.yaml`. Конфиг
