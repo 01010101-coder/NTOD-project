@@ -1,6 +1,6 @@
 # Continuous integration: установка, линтер и тесты на каждый push и pull request.
-# make install ставит проект с extras dev, ml и app — этого достаточно для
-# lint и полного набора тестов; кеш pip считается по хешу pyproject.toml.
+# make install ставит проект с зависимостями (включая torch/scikit-learn) и
+# extras dev — этого достаточно для lint и полного набора тестов; кеш pip считается по хешу pyproject.toml.
 
 name: CI
 

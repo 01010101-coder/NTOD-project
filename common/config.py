@@ -32,9 +32,9 @@ class StorageCfg(_CfgBase):
 
 
 # Канонический мир — приложение А плана M2 (§6: дефолты моделей равны
-# каноническим значениям). Числа — стартовая точка; финальные фиксируются
-# калибровкой (change ``m2-calibration``) и обновляются здесь же и в
-# ``config.yaml``.
+# каноническим значениям). Профили спроса, drivers.count и dest_decay_min —
+# финальные числа калибровки (change ``m2-calibration``), синхронно внесённые
+# в ``config.yaml``; прочие числа — стартовые значения приложения А.
 _DEFAULT_ZONE_ROWS: list[dict[str, Any]] = [
     {
         "id": 0,
@@ -98,33 +98,34 @@ _DEFAULT_ROAD_ROWS: list[dict[str, Any]] = [
 ]
 
 # Суточные профили спроса: архетип -> будни/выходные -> строка 24 множителей на
-# часы 00–23. Числа записаны строками по 24 значения, чтобы каждый профиль
+# часы 00–23. Значения — финальные после калибровки ``m2-calibration`` (равны
+# ``config.yaml``). Числа записаны строками по 24 значения, чтобы каждый профиль
 # читался одной строкой, как в приложении А (ruff format разворачивает длинные
 # списки по одному элементу на строку); разбор строки — в ``_hours``.
 _PROFILE_ROWS: dict[str, dict[str, str]] = {
     "residential": {
-        "weekday": "0.2 0.15 0.1 0.1 0.1 0.2 0.6 1.2 1.6 1.3 0.9 0.8 "
-        "0.8 0.8 0.8 0.9 1.0 1.2 1.4 1.3 1.1 0.9 0.6 0.35",
-        "weekend": "0.3 0.25 0.2 0.15 0.1 0.15 0.3 0.5 0.7 0.9 1.0 1.1 "
-        "1.1 1.1 1.1 1.1 1.1 1.2 1.3 1.3 1.2 1.0 0.8 0.5",
+        "weekday": "0.1 0.08 0.07 0.07 0.07 0.1 0.2 0.35 0.42 0.35 0.28 0.25 "
+        "0.25 0.25 0.25 0.28 0.32 0.38 0.42 0.38 0.35 0.32 0.2 0.14",
+        "weekend": "0.14 0.12 0.1 0.08 0.08 0.1 0.18 0.25 0.32 0.35 0.38 0.38 "
+        "0.38 0.38 0.38 0.38 0.42 0.45 0.5 0.45 0.42 0.38 0.28 0.2",
     },
     "business": {
-        "weekday": "0.15 0.1 0.1 0.1 0.15 0.3 0.7 1.3 1.7 1.5 1.2 1.1 "
-        "1.1 1.1 1.1 1.2 1.3 1.6 1.7 1.4 1.0 0.7 0.4 0.25",
-        "weekend": "0.2 0.15 0.1 0.1 0.1 0.15 0.25 0.4 0.6 0.8 0.9 1.0 "
-        "1.0 1.0 1.0 1.0 1.0 1.1 1.2 1.2 1.1 0.9 0.6 0.4",
+        "weekday": "0.2 0.15 0.12 0.12 0.15 0.25 0.45 0.6 0.7 0.65 0.55 0.55 "
+        "0.55 0.55 0.55 0.6 0.7 1.0 1.3 1.4 1.35 1.2 0.7 0.4",
+        "weekend": "0.25 0.2 0.15 0.15 0.15 0.2 0.3 0.4 0.5 0.55 0.6 0.6 "
+        "0.6 0.6 0.6 0.65 0.75 0.9 1.0 1.05 1.0 0.9 0.6 0.4",
     },
     "airport": {
-        "weekday": "0.7 0.7 0.7 0.8 0.8 0.9 1.0 1.1 1.1 1.1 1.1 1.0 "
-        "1.0 1.0 1.0 1.0 1.0 1.1 1.1 1.1 1.1 1.0 0.9 0.8",
-        "weekend": "0.8 0.75 0.7 0.7 0.8 0.9 0.95 1.0 1.05 1.1 1.1 1.0 "
-        "1.0 1.0 1.0 1.0 1.0 1.05 1.1 1.1 1.1 1.0 0.95 0.85",
+        "weekday": "0.5 0.5 0.5 0.55 0.55 0.6 0.65 0.7 0.7 0.7 0.65 0.6 "
+        "0.6 0.6 0.6 0.6 0.65 0.7 0.75 0.8 0.8 0.75 0.65 0.55",
+        "weekend": "0.55 0.5 0.5 0.5 0.55 0.6 0.65 0.7 0.75 0.75 0.7 0.65 "
+        "0.65 0.65 0.65 0.65 0.7 0.75 0.8 0.8 0.8 0.7 0.65 0.6",
     },
     "mixed": {
-        "weekday": "0.5 0.4 0.3 0.2 0.15 0.15 0.25 0.4 0.6 0.8 0.9 0.9 "
-        "0.9 0.9 1.0 1.0 1.1 1.2 1.3 1.4 1.5 1.5 1.3 0.9",
-        "weekend": "0.8 0.7 0.55 0.4 0.25 0.2 0.25 0.35 0.5 0.7 0.85 0.95 "
-        "1.0 1.0 1.05 1.1 1.15 1.25 1.35 1.45 1.6 1.6 1.4 1.1",
+        "weekday": "0.3 0.25 0.2 0.2 0.2 0.25 0.35 0.45 0.55 0.55 0.55 0.55 "
+        "0.55 0.6 0.6 0.65 0.75 0.9 1.0 1.05 1.1 1.0 0.8 0.5",
+        "weekend": "0.35 0.3 0.25 0.25 0.25 0.3 0.4 0.5 0.6 0.65 0.65 0.65 "
+        "0.65 0.7 0.7 0.75 0.85 0.95 1.05 1.1 1.15 1.05 0.85 0.6",
     },
 }
 
@@ -200,7 +201,7 @@ class DemandCfg(_CfgBase):
 
     base_rate: float = 2.0
     profiles: dict[str, dict[str, list[float]]] = Field(default_factory=_default_profiles)
-    dest_decay_min: int = 15
+    dest_decay_min: int = 12  # финальное число калибровки m2-calibration
 
     @field_validator("profiles")
     @classmethod
@@ -218,11 +219,29 @@ class DemandCfg(_CfgBase):
         return value
 
 
-class DriversCfg(_CfgBase):
-    """Парк водителей: размер и лимит ожидания назначения."""
+class RepositionCfg(_CfgBase):
+    """Отклик предложения на тариф (change ``m6-supply-response``): переезды свободных.
 
-    count: int = 200
+    Свободные водители раз в ``every_min`` минут переезжают в зону с приростом
+    тарифа не ниже ``min_gain`` на пути не длиннее ``max_reach_min``; из зоны
+    уезжает доля ``min(max_share, sensitivity × gain)``. При ``enabled = false``
+    (дефолт) движок работает побитово как до change'а.
+    """
+
+    enabled: bool = False
+    every_min: int = Field(default=5, ge=1)
+    min_gain: float = Field(default=0.10, gt=0)
+    sensitivity: float = Field(default=1.0, gt=0)
+    max_share: float = Field(default=0.3, gt=0, le=1.0)
+    max_reach_min: int = Field(default=12, ge=1)
+
+
+class DriversCfg(_CfgBase):
+    """Парк водителей: размер, лимит ожидания назначения и отклик на тариф."""
+
+    count: int = 380  # финальное число калибровки m2-calibration
     wait_limit_min: int = 6
+    reposition: RepositionCfg = Field(default_factory=RepositionCfg)
 
 
 class WeatherCfg(_CfgBase):
@@ -274,8 +293,131 @@ class EngineCfg(_CfgBase):
     sim_start: str = "2026-11-02"
 
 
+class AppCfg(_CfgBase):
+    """Сервер воспроизведения (change ``replay-server``): адрес, порт и дни лога."""
+
+    host: str = "127.0.0.1"
+    port: int = 8000
+    days: int = 30
+
+
+class MlCfg(_CfgBase):
+    """Машинное обучение (change ``m3-dataset``): эпоха данных и гиперпараметры.
+
+    Дефолты — приложение А плана M3 (docs/plan-m3-ml.md): ``db`` — БД единой
+    эпохи (37-дневный прогон мира), ``train_days``/``val_days``/``test_days`` —
+    роли целых дней (train — дни 1–28, val — хвост train 29–30 для ранней
+    остановки, test — продолжение мира 31–37), ``window_hours`` — окно истории
+    признаков (финальное число свипа 3/6/12 change ``m3-train-cli``:
+    победило окно 3 — val MAE спроса 1.806 против 1.848/1.843, синхронно с
+    config.yaml, как ``dest_decay_min`` после m2-calibration);
+    гиперпараметры обучения заводятся один раз на все changes вехи M3.
+    """
+
+    db: str = "data/m3_epoch.db"
+    train_days: int = 30
+    val_days: int = 2
+    test_days: int = 7
+    window_hours: int = 3
+    zone_embed_dim: int = 8
+    mlp_hidden: list[int] = Field(default_factory=lambda: [256, 128])
+    lstm_hidden: int = 64
+    lstm_layers: int = 1
+    dropout: float = 0.1
+    lr: float = 0.001
+    batch_size: int = 256
+    max_epochs: int = 100
+    patience: int = 8
+    cls_weight: float = 1.0
+    seed: int = 42  # отдельный от мира seed обучения
+
+
+# Стартовые числа политики — приложение А плана M5+M6 (docs/plan-m5-m6-policy.md);
+# калибровка δ-сдвигов и частот срабатываний — change ``m6-worlds``.
+_DEFAULT_STAIR_ROWS: list[dict[str, float]] = [
+    {"p_min": 0.80, "mult": 1.50},
+    {"p_min": 0.60, "mult": 1.30},
+    {"p_min": 0.40, "mult": 1.15},
+]
+
+# δ-сдвиги ступеней по семействам моделей; модель без записи в ``shift``
+# получает сдвиг 0.0 (сценарий «Значения из файла переопределяют дефолты»).
+# Значения — результат приёмочной δ-калибровки change ``m6-worlds``
+# (artifacts/policy-calibration.json: val-дни 29–30 эпохи M3, цель 0.10,
+# частоты после 0.100/0.102), синхронно с config.yaml — прецедент
+# dest_decay_min/drivers.count после m2-calibration.
+_DEFAULT_SHIFT: dict[str, float] = {"mlp": -0.453, "lstm": -0.438}
+
+
+class PolicyStairCfg(_CfgBase):
+    """Ступень политики цены: порог вероятности дефицита и множитель тарифа."""
+
+    p_min: float
+    mult: float
+
+    @field_validator("p_min")
+    @classmethod
+    def _check_p_min(cls, value: float) -> float:
+        """Порог ступени обязан лежать в открытом интервале (0, 1)."""
+
+        if not 0.0 < value < 1.0:
+            raise ValueError(f"p_min должен быть в интервале (0, 1), получено {value}")
+        return value
+
+    @field_validator("mult")
+    @classmethod
+    def _check_mult(cls, value: float) -> float:
+        """Множитель ступени не может снижать тариф (нейтральный 1.0 или выше)."""
+
+        if value < 1.0:
+            raise ValueError(f"mult должен быть >= 1.0, получено {value}")
+        return value
+
+
+def _default_stairs() -> list[PolicyStairCfg]:
+    """Три ступени приложения А плана M5+M6 (каждый вызов — новые объекты)."""
+
+    return [PolicyStairCfg(**row) for row in _DEFAULT_STAIR_ROWS]
+
+
+class PolicyCfg(_CfgBase):
+    """Политика цены (change ``m6-policy``): ступени по прогнозу дефицита.
+
+    Дефолты — приложение А плана M5+M6: ``stairs`` записаны по убыванию
+    ``p_min`` (порядок списка на выбор ступени не влияет), ``shift`` —
+    δ-сдвиги эффективной вероятности по семействам моделей, ``worlds_dir`` —
+    каталог миров веточного генератора (потребитель — change ``m6-worlds``).
+    """
+
+    horizon_min: int = 15
+    stairs: list[PolicyStairCfg] = Field(default_factory=_default_stairs)
+    total_cap: float = 2.0
+    reactive_mult: float = 1.30
+    shift: dict[str, float] = Field(default_factory=lambda: dict(_DEFAULT_SHIFT))
+    target_fire_rate: float = 0.10
+    worlds_dir: str = "data/worlds"
+
+    @field_validator("stairs")
+    @classmethod
+    def _check_stairs_non_empty(cls, value: list[PolicyStairCfg]) -> list[PolicyStairCfg]:
+        """Список ступеней не может быть пустым — политика без ступеней бессмысленна."""
+
+        if not value:
+            raise ValueError("stairs не может быть пустым списком — задайте хотя бы одну ступень")
+        return value
+
+    @field_validator("shift")
+    @classmethod
+    def _fill_shift_defaults(cls, value: dict[str, float]) -> dict[str, float]:
+        """Незаданная в YAML модель получает калиброванный δ-сдвиг из ``_DEFAULT_SHIFT``."""
+
+        merged = dict(_DEFAULT_SHIFT)
+        merged.update(value)
+        return merged
+
+
 class AppConfig(_CfgBase):
-    """Корневая конфигурация проекта: секции канона §6 плана M2."""
+    """Корневая конфигурация проекта: секции канона §6 плана M2, ``ml`` и ``policy``."""
 
     seed: int = 42
     storage: StorageCfg = Field(default_factory=StorageCfg)
@@ -287,6 +429,9 @@ class AppConfig(_CfgBase):
     events: EventsCfg = Field(default_factory=EventsCfg)
     pricing: PricingCfg = Field(default_factory=PricingCfg)
     engine: EngineCfg = Field(default_factory=EngineCfg)
+    app: AppCfg = Field(default_factory=AppCfg)
+    ml: MlCfg = Field(default_factory=MlCfg)
+    policy: PolicyCfg = Field(default_factory=PolicyCfg)
 
 
 def load_config(path: str | Path) -> AppConfig:

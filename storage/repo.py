@@ -190,9 +190,9 @@ def list_zone_metrics(
 def insert_forecasts(conn: sqlite3.Connection, rows: list[dict]) -> None:
     """Вставить батч строк ``forecasts`` одной операцией (одна транзакция).
 
-    PK ``(ts, zone_id, horizon_min)`` задаёт вызывающий код; ключи строки:
-    ``ts`` (datetime), ``zone_id``, ``horizon_min``, ``pred_requests``,
-    ``pred_free_drivers``, ``deficit_prob``, ``model_version``.
+    PK ``(ts, zone_id, horizon_min, model_version)`` задаёт вызывающий код;
+    ключи строки: ``ts`` (datetime), ``zone_id``, ``horizon_min``,
+    ``pred_requests``, ``pred_free_drivers``, ``deficit_prob``, ``model_version``.
     """
     if not rows:
         return
@@ -210,6 +210,21 @@ def insert_forecasts(conn: sqlite3.Connection, rows: list[dict]) -> None:
     ]
     with transaction(conn):
         conn.executemany(_INSERT_FORECASTS, params)
+
+
+def delete_forecasts(conn: sqlite3.Connection, model_version: str) -> int:
+    """Удалить все строки одной версии модели (одна транзакция); вернуть число удалённых.
+
+    Повторный прогон инференса (change ``m3-inference``) вызывает перед вставкой:
+    замена строго своих строк — идемпотентность вместо падения на PK; строки
+    чужих ``model_version`` и другие таблицы не затрагиваются.
+    """
+
+    with transaction(conn):
+        cursor = conn.execute(
+            f"DELETE FROM {TABLE_FORECASTS} WHERE model_version = ?", (model_version,)
+        )
+        return cursor.rowcount
 
 
 def list_forecasts(

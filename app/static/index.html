@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Такси — живой город</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-app="city-canvas" data-tab="city">
+  <header id="panel">
+    <div class="chip clock">
+      <span id="clock-time">--:--</span>
+      <span id="clock-date">— · —</span>
+    </div>
+    <label class="chip world" for="world-select" title="мир воспроизведения">мир
+      <select id="world-select"></select>
+    </label>
+    <div class="chip world-label" id="world-label" title="метка активного мира">—</div>
+    <button id="paint-toggle" class="chip toggle" title="окраска зон">кайма: факт</button>
+    <div class="chip" id="weather">☁️ ясно</div>
+    <div class="chip event hidden" id="event-badge"></div>
+    <div class="chip counters">
+      <span id="cars-count" title="активные машины">🚗 0</span>
+      <span id="orders-count" title="ожидают назначения">🕐 0</span>
+    </div>
+    <button id="play-pause" title="воспроизведение">▶</button>
+    <label class="chip" for="speed-select">скорость
+      <select id="speed-select">
+        <option value="0.25">0.25×</option>
+        <option value="1" selected>1×</option>
+        <option value="5">5×</option>
+        <option value="15">15×</option>
+        <option value="60">60×</option>
+        <option value="120">120×</option>
+        <option value="600">600×</option>
+      </select>
+    </label>
+    <div class="chip status" id="status">подключение…</div>
+  </header>
+
+  <nav id="tab-bar">
+    <button class="tab active" data-tab="city">Город</button>
+    <button class="tab" data-tab="lab">Лаборатория</button>
+    <button class="tab" data-tab="compare">Сравнение</button>
+  </nav>
+
+  <main id="map-wrap">
+    <canvas id="map"></canvas>
+    <div id="map-legend">
+      <span><i class="swatch to-pickup"></i>к пассажиру</span>
+      <span><i class="swatch on-trip"></i>в поездке</span>
+      <span><i class="swatch pending"></i>ожидание</span>
+      <span><i class="swatch flash"></i>истечение</span>
+      <span><i class="swatch deficit"></i>дефицит</span>
+    </div>
+  </main>
+
+  <section id="charts">
+    <div id="charts-head">
+      <label class="chip" for="zone-select">зона
+        <select id="zone-select"></select>
+      </label>
+      <div id="charts-legend">
+        <span><i class="line requests"></i>заказы</span>
+        <span><i class="line completed"></i>завершено</span>
+        <span><i class="line unfulfilled"></i>не выполнено</span>
+        <span><i class="line free"></i>свободные</span>
+        <span><i class="line price"></i>тариф</span>
+      </div>
+    </div>
+    <canvas id="chart"></canvas>
+  </section>
+
+  <footer id="slider-bar">
+    <span class="range-edge" id="range-first">—</span>
+    <input id="time-slider" type="range" min="0" max="0" value="0" step="1">
+    <span class="range-edge" id="range-last">—</span>
+  </footer>
+
+  <section id="lab">
+    <div id="lab-empty" class="hidden">
+      <p>ML-данных нет. Сгенерируйте эпоху и прогоните обучение с инференсом:
+        <code>make epoch</code> → <code>python -m ml train</code> →
+        <code>python -m ml infer</code> — после этого откройте вкладку заново.</p>
+    </div>
+    <div id="lab-grid" class="hidden">
+      <section class="lab-card" id="model-panel">
+        <h2>Модель</h2>
+        <label class="lab-field">версия
+          <select id="ml-model-select"></select>
+        </label>
+        <div id="model-meta"></div>
+        <canvas id="loss-chart" class="lab-chart"></canvas>
+      </section>
+
+      <section class="lab-card" id="calibration-panel">
+        <h2>Калибровка</h2>
+        <label class="lab-field">горизонт
+          <select id="ml-cal-horizon-select">
+            <option value="15" selected>15 мин</option>
+            <option value="30">30 мин</option>
+          </select>
+        </label>
+        <canvas id="calibration-chart" class="lab-chart"></canvas>
+      </section>
+
+      <section class="lab-card wide" id="summary-panel">
+        <h2>Сводная метрик</h2>
+        <div id="summary-table" class="table-wrap"></div>
+      </section>
+
+      <section class="lab-card wide" id="forecast-panel">
+        <h2>Факт vs прогноз</h2>
+        <div class="lab-selectors">
+          <label class="lab-field">зона
+            <select id="ml-zone-select"></select>
+          </label>
+          <label class="lab-field">горизонт
+            <select id="ml-horizon-select">
+              <option value="15" selected>15 мин</option>
+              <option value="30">30 мин</option>
+            </select>
+          </label>
+          <label class="lab-field">модель
+            <select id="ml-fc-model-select"></select>
+          </label>
+          <label class="lab-field">таргет
+            <select id="ml-target-select">
+              <option value="requests" selected>спрос</option>
+              <option value="free">сток</option>
+            </select>
+          </label>
+          <span id="forecast-legend" class="lab-legend">
+            <span><i class="line" style="background:#4cc9f0"></i>прогноз</span>
+            <span><i class="line" style="background:#ffd166"></i>факт</span>
+            <span><i class="band"></i>дефицит (prob &gt; 0.5)</span>
+          </span>
+        </div>
+        <canvas id="forecast-chart" class="lab-chart tall"></canvas>
+      </section>
+
+      <section class="lab-card wide" id="errors-panel">
+        <h2>Ошибки (таргет спроса)</h2>
+        <div id="errors-grid">
+          <div>
+            <span class="lab-caption">остатки по времени</span>
+            <canvas id="residual-chart" class="lab-chart"></canvas>
+          </div>
+          <div>
+            <span class="lab-caption">гистограмма остатков</span>
+            <canvas id="histogram-chart" class="lab-chart"></canvas>
+          </div>
+          <div>
+            <span class="lab-caption">MAE по часу суток</span>
+            <canvas id="by-hour-chart" class="lab-chart"></canvas>
+          </div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <section id="compare">
+    <div id="compare-empty" class="hidden">
+      <p>БД веток не найдены. Сгенерируйте сетку миров:
+        <code>python -m simulator.branches --all</code> — после этого откройте
+        вкладку заново.</p>
+    </div>
+    <div id="compare-grid" class="hidden">
+      <section class="lab-card" id="compare-outcomes-panel">
+        <h2>Исходы тест-недели</h2>
+        <div id="compare-window" class="lab-caption"></div>
+        <div id="compare-table" class="table-wrap"></div>
+      </section>
+
+      <section class="lab-card" id="compare-revenue-panel">
+        <h2>Кумулятивная выручка, млн ₽</h2>
+        <div id="compare-revenue-head">
+          <span id="compare-legend" class="lab-legend"></span>
+        </div>
+        <canvas id="revenue-chart" class="lab-chart tall"></canvas>
+        <p id="compare-revenue-note" class="lab-note"></p>
+      </section>
+
+      <section class="lab-card" id="compare-accuracy-panel">
+        <h2>Точность тень-моделей</h2>
+        <div id="compare-accuracy" class="table-wrap"></div>
+        <p class="lab-note">Точность считается против факта ветки A; в B/C/D не
+          показывается — политика меняет факт (self-fulfilling prophecy).</p>
+      </section>
+    </div>
+  </section>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/map.js"></script>
+  <script src="/static/charts.js"></script>
+</body>
+</html>

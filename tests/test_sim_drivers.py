@@ -16,6 +16,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from common.config import load_config
 from simulator.city import build_city
@@ -43,6 +44,7 @@ def test_api_public_names_and_enum_values() -> None:
     assert DriverState.FREE.value == "free"
     assert DriverState.TO_PICKUP.value == "to_pickup"
     assert DriverState.ON_TRIP.value == "on_trip"
+    assert DriverState.RELOCATING.value == "relocating"
 
 
 def test_api_driver_has_exactly_five_fields() -> None:
@@ -272,3 +274,112 @@ def test_travel_minutes_minimum_one_minute() -> None:
     """Минимум 1 минута: путь 0 (водитель уже в зоне посадки) → 1 при любом множителе."""
     assert travel_minutes(0, 1.4) == 1
     assert travel_minutes(0, 1.0) == 1
+
+
+# --- Порожний переезд (change m6-supply-response, спека simulator-drivers) ---
+
+
+def test_relocate_full_cycle() -> None:
+    """Сценарий «Полный цикл переезда»: 3 минуты, прибытие не в списке высадок."""
+
+    fleet = Fleet(10, 6)  # водитель 6 — в зоне 0 (старт i mod Z)
+    fleet.relocate(6, 5, 3)
+    assert fleet._drivers[6].state is DriverState.RELOCATING
+    assert fleet._drivers[6].trip_id is None
+    assert fleet._drivers[6].remaining_min == 3
+
+    returned = [fleet.tick(), fleet.tick()]
+    for pairs in returned:
+        assert all(driver_id != 6 for driver_id, _zone in pairs)
+    assert fleet._drivers[6].state is DriverState.RELOCATING
+    assert fleet._drivers[6].zone == 0
+    assert fleet.arrivals() == []
+
+    returned.append(fleet.tick())
+    for pairs in returned:
+        assert all(driver_id != 6 for driver_id, _zone in pairs)
+    assert fleet.arrivals() == [(6, 5)]
+    assert fleet._drivers[6].state is DriverState.FREE
+    assert fleet._drivers[6].zone == 5
+    assert fleet._drivers[6].trip_id is None
+    assert fleet._drivers[6].remaining_min == 0
+
+
+def test_relocating_not_returned_by_nearest_free() -> None:
+    """Сценарий «Переезжающий не получает заказ»: единственный водитель в переезде."""
+
+    fleet = Fleet(1, 6)
+    fleet.relocate(0, 5, 3)
+    assert fleet.nearest_free(0, np.array([1, 1, 1, 1, 1, 1])) is None
+
+
+def test_relocate_busy_driver_rejected() -> None:
+    """Сценарий «Переезд занятого водителя запрещён» для трёх занятых состояний."""
+
+    # to_pickup
+    fleet = Fleet(1, 6)
+    fleet.assign(0, 1, 2)
+    with pytest.raises(ValueError, match="переезд запрещён"):
+        fleet.relocate(0, 5, 3)
+    assert fleet._drivers[0].state is DriverState.TO_PICKUP
+
+    # on_trip
+    fleet = Fleet(1, 6)
+    fleet.assign(0, 1, 1)
+    fleet._plan_trip(0, 2, 3)
+    fleet.tick()  # посадка: to_pickup → on_trip
+    assert fleet._drivers[0].state is DriverState.ON_TRIP
+    with pytest.raises(ValueError, match="переезд запрещён"):
+        fleet.relocate(0, 5, 3)
+    assert fleet._drivers[0].state is DriverState.ON_TRIP
+
+    # relocating
+    fleet = Fleet(1, 6)
+    fleet.relocate(0, 5, 3)
+    with pytest.raises(ValueError, match="переезд запрещён"):
+        fleet.relocate(0, 4, 2)
+    assert fleet._drivers[0].state is DriverState.RELOCATING
+    assert fleet._drivers[0].zone == 0
+
+
+def test_zones_counter_snapshots_along_relocation() -> None:
+    """Сценарий «Снапшоты вдоль переезда»: занят в исходной зоне, свободен в цели."""
+
+    fleet = Fleet(200, 6)
+    before_free = fleet.free_by_zone().tolist()
+    before_busy = fleet.busy_by_zone().tolist()
+
+    fleet.relocate(6, 5, 2)  # водитель 6 — в зоне 0
+    assert fleet.free_by_zone().tolist()[0] == before_free[0] - 1
+    assert fleet.busy_by_zone().tolist()[0] == before_busy[0] + 1
+
+    fleet.tick()
+    fleet.tick()
+    assert fleet.arrivals() == [(6, 5)]
+    assert fleet.busy_by_zone().tolist()[0] == before_busy[0]
+    assert fleet.free_by_zone().tolist()[5] == before_free[5] + 1
+
+
+def test_counters_sum_constant_along_relocation() -> None:
+    """Сценарий «Сумма счётчиков постоянна» на смеси назначений и переездов."""
+
+    fleet = Fleet(200, 6)
+    fleet.assign(0, 1, 2)
+    fleet._plan_trip(0, 4, 3)
+    fleet.relocate(6, 5, 2)
+    fleet.relocate(7, 3, 4)
+    for _ in range(8):
+        fleet.tick()
+        assert int(fleet.free_by_zone().sum() + fleet.busy_by_zone().sum()) == 200
+
+
+def test_arrivals_ascending_id() -> None:
+    """Прибытия последнего ``tick()`` идут по возрастанию ``driver_id``."""
+
+    fleet = Fleet(20, 6)
+    fleet.relocate(9, 5, 1)
+    fleet.relocate(3, 4, 1)
+    fleet.relocate(6, 3, 1)
+
+    assert fleet.tick() == []  # прибытия не попадают в список высадок
+    assert fleet.arrivals() == [(3, 4), (6, 3), (9, 5)]

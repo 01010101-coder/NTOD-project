@@ -13,19 +13,25 @@ dependencies = [
     "pandas",
     "pydantic>=2",
     "PyYAML",
+    "fastapi",
+    "uvicorn[standard]",
+    "torch",
+    "scikit-learn",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "ruff",
+    "httpx2",
 ]
 
 # Пакеты верхнего уровня перечислены явно: автообнаружение setuptools в
 # flat-layout падает при нескольких пакетах («Multiple top-level packages
 # discovered»); каталог tests/ пакетом дистрибутива не является.
 [tool.setuptools]
-packages = ["common", "storage", "simulator"]
+packages = ["common", "storage", "simulator", "ml", "app"]
 
 # Линтер и форматтер: длина строки 100, правила E, F, I, W, UP (план M1 §7.6).
 [tool.ruff]
@@ -34,7 +40,9 @@ line-length = 100
 # Markdown — нормативные документы (планы, design change'ов): python-код-блоки
 # в них цитируются дословно и ruff format'у не принадлежат (решение владельца
 # прогона m2-city: иначе цитаты приложения Б роняют make lint).
-extend-exclude = [".opencode", "*.md"]
+# Ноутбуки (notebooks/) — исследовательские артефакты разведки M3, не пакет
+# проекта: их стиль не входит в ворота make lint (прецедент *.md).
+extend-exclude = [".opencode", "*.md", "*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]

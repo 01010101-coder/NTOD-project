@@ -36,15 +36,33 @@ from simulator.demand import (
 # Эталонный конфиг ищется относительно файла теста, не от cwd (как в M1-тестах).
 REFERENCE_CONFIG = Path(__file__).resolve().parents[1] / "config.yaml"
 
-# Нейтральная сим-минута: понедельник (будни) 16:00, профиль residential = 1.0.
+# Нейтральная сим-минута: понедельник (будни) 16:00. У калиброванных
+# (m2-calibration) профилей нет часа с множителем 1.0, поэтому тесты, которым
+# нужен минуты БЕЗ профильного фактора, берут _flat_profiles_cfg().
 NO_FACTOR_MINUTE = datetime(2026, 11, 2, 16, 0)
 
 
-def _mutated_cfg(mutate: Callable[[dict], None]) -> AppConfig:
+def _mutated_cfg(mutate: Callable[[dict], None], base: AppConfig | None = None) -> AppConfig:
     """Конфиг с точечной правкой payload — источник синтетических конфигов."""
-    payload = AppConfig().model_dump()
+    payload = (base if base is not None else AppConfig()).model_dump()
     mutate(payload)
     return AppConfig.model_validate(payload)
+
+
+def _flat_profiles_cfg() -> AppConfig:
+    """Конфиг с плоскими профилями: множители всех часов всех архетипов = 1.0.
+
+    Синтетическая «нейтральная минута» без профильного фактора — независимая
+    от калиброванных чисел эталона арена для тестов прочих множителей λ.
+    """
+
+    def flatten(payload: dict) -> None:
+        payload["demand"]["profiles"] = {
+            archetype: {"weekday": [1.0] * 24, "weekend": [1.0] * 24}
+            for archetype in payload["demand"]["profiles"]
+        }
+
+    return _mutated_cfg(flatten)
 
 
 def _rate(city: CitySpec, zone: ZoneInfo, t: datetime, cfg: AppConfig, **overrides) -> float:
@@ -67,8 +85,12 @@ def _spawn(city: CitySpec, t: datetime, cfg: AppConfig, seed: int, pm=None) -> l
     )
 
 
-def _origin_only_cfg(origin_id: int = 0, pull: float = 20000.0) -> AppConfig:
-    """Эталонный город, порождающий пассажиров только из одной зоны."""
+def _origin_only_cfg(origin_id: int = 0, pull: float = 80000.0) -> AppConfig:
+    """Эталонный город, порождающий пассажиров только из одной зоны.
+
+    ``pull`` — статистический рычаг объёма выборки спавна: подъят после
+    калибровки (m2-calibration), снизившей дневные множители профилей эталона.
+    """
 
     def zero_other_origins(payload: dict) -> None:
         for row in payload["city"]["zones"]:
@@ -121,10 +143,20 @@ def _small_city_cfg(origin_pull: float = 0.0, decay: int = 15) -> AppConfig:
     "cfg", [load_config(REFERENCE_CONFIG), AppConfig()], ids=["reference", "defaults"]
 )
 def test_lambda_base_rate_exact(cfg: AppConfig) -> None:
-    """λ без факторов равна base_rate точно (спека: сценарий 1; решение 6)."""
+    """λ без дождя/события/тарифа = base_rate × профиль часа (сценарий 1; реш. 6).
+
+    Точное равенство base_rate — на плоском профиле: у калиброванных профилей
+    нейтрального часа с множителем 1.0 не существует.
+    """
     city = build_city(cfg)
     zone = city.zones[0]  # residential, attract_origin = 1.0
-    assert _rate(city, zone, NO_FACTOR_MINUTE, cfg) == cfg.demand.base_rate == 2.0
+    expected = cfg.demand.base_rate * city.profiles["residential"].weekday[NO_FACTOR_MINUTE.hour]
+    assert _rate(city, zone, NO_FACTOR_MINUTE, cfg) == pytest.approx(expected)
+    flat = _flat_profiles_cfg()
+    flat_city = build_city(flat)
+    assert (
+        _rate(flat_city, flat_city.zones[0], NO_FACTOR_MINUTE, flat) == flat.demand.base_rate == 2.0
+    )
 
 
 def test_lambda_each_multiplier_multiplicative() -> None:
@@ -139,8 +171,11 @@ def test_lambda_each_multiplier_multiplicative() -> None:
     expected = reference.demand.base_rate * city.profiles["residential"].weekday[8]
     assert _rate(city, zone0, hour8, reference) == pytest.approx(expected)
 
-    # attract_origin: зона с весом источника 1.5 при нейтральном профиле
-    pull_cfg = _mutated_cfg(lambda p: p["city"]["zones"][0].update({"attract_origin": 1.5}))
+    # attract_origin: зона с весом источника 1.5 при нейтральном (плоском) профиле
+    pull_cfg = _mutated_cfg(
+        lambda p: p["city"]["zones"][0].update({"attract_origin": 1.5}),
+        base=_flat_profiles_cfg(),
+    )
     pull_city = build_city(pull_cfg)
     expected = pull_cfg.demand.base_rate * 1.5
     assert _rate(pull_city, pull_city.zones[0], NO_FACTOR_MINUTE, pull_cfg) == pytest.approx(
@@ -148,7 +183,10 @@ def test_lambda_each_multiplier_multiplicative() -> None:
     )
 
     # population.scale: масштаб всего города
-    scale_cfg = _mutated_cfg(lambda p: p["population"].update({"scale": 2.0}))
+    scale_cfg = _mutated_cfg(
+        lambda p: p["population"].update({"scale": 2.0}),
+        base=_flat_profiles_cfg(),
+    )
     scale_city = build_city(scale_cfg)
     expected = scale_cfg.demand.base_rate * scale_cfg.population.scale
     assert _rate(scale_city, scale_city.zones[0], NO_FACTOR_MINUTE, scale_cfg) == pytest.approx(
@@ -156,8 +194,12 @@ def test_lambda_each_multiplier_multiplicative() -> None:
     )
 
     # дождь: is_rain=True × weather.demand_mult
-    expected = reference.demand.base_rate * reference.weather.demand_mult
-    assert _rate(city, zone0, NO_FACTOR_MINUTE, reference, is_rain=True) == pytest.approx(expected)
+    flat = _flat_profiles_cfg()
+    flat_city = build_city(flat)
+    expected = flat.demand.base_rate * flat.weather.demand_mult
+    assert _rate(flat_city, flat_city.zones[0], NO_FACTOR_MINUTE, flat, is_rain=True) == (
+        pytest.approx(expected)
+    )
 
     # событие: пятница 18:00, business в archetypes → × event_mult
     friday18 = datetime(2026, 11, 6, 18, 0)
@@ -173,9 +215,9 @@ def test_lambda_each_multiplier_multiplicative() -> None:
     ) == pytest.approx(expected)
 
     # тариф: price_mult = 2.0 при α = 1 → × 2.0**(-1)
-    expected = reference.demand.base_rate * 2.0 ** (-reference.pricing.elasticity_alpha)
-    assert _rate(city, zone0, NO_FACTOR_MINUTE, reference, price_mult=2.0) == pytest.approx(
-        expected
+    expected = flat.demand.base_rate * 2.0 ** (-flat.pricing.elasticity_alpha)
+    assert _rate(flat_city, flat_city.zones[0], NO_FACTOR_MINUTE, flat, price_mult=2.0) == (
+        pytest.approx(expected)
     )
 
 

@@ -6,7 +6,8 @@ context: |
   docs/сквозной проект спецификация (1).pdf (исходное ТЗ).
 
   Стек: Python 3.11+, numpy, pandas, pydantic v2, PyYAML, SQLite (модуль sqlite3),
-  matplotlib для отладочных графиков. Позже: PyTorch, scikit-learn, streamlit, plotly.
+  matplotlib для отладочных графиков. Позже: PyTorch, scikit-learn,
+  FastAPI + WebSocket (сервер воспроизведения), canvas-фронтенд без сборки.
   Инструменты: ruff (lint + format), pytest. Виртуальное окружение — .venv в корне проекта.
 
   Структура пакетов (в корне проекта, без src/):
@@ -14,7 +15,7 @@ context: |
     storage/   — SQLite-схема и слой доступа, экспорт CSV
     simulator/ — модель города, генерация спроса, водители, события, цикл симуляции
     ml/        — подготовка данных, модели, обучение, инференс (позже)
-    app/       — Streamlit-дашборд (позже)
+    app/       — сервер воспроизведения (FastAPI + WebSocket) и canvas-фронтенд без сборки
     tests/     — pytest, по файлу на модуль
 
   Контракт данных (раздел 2 плана):

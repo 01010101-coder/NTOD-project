@@ -17,11 +17,16 @@ import numpy as np
 
 
 class DriverState(enum.Enum):
-    """Состояние водителя (§3.5): свободен, едет за заказом, везёт пассажира."""
+    """Состояние водителя (§3.5): свободен, едет за заказом, везёт, порожняком.
+
+    ``RELOCATING`` добавлен change'ем ``m6-supply-response``: водитель едет
+    порожняком в зону с более высоким тарифом и до прибытия занят.
+    """
 
     FREE = "free"
     TO_PICKUP = "to_pickup"
     ON_TRIP = "on_trip"
+    RELOCATING = "relocating"
 
 
 @dataclass
@@ -31,8 +36,8 @@ class Driver:
     id: int
     zone: int
     state: DriverState
-    trip_id: int | None  # внутренний id заказа; None у свободного водителя
-    remaining_min: int  # до посадки (TO_PICKUP) или до высадки (ON_TRIP)
+    trip_id: int | None  # внутренний id заказа; None у свободного и переезжающего
+    remaining_min: int  # до посадки (TO_PICKUP), высадки (ON_TRIP) или прибытия (RELOCATING)
 
 
 def travel_minutes(path_min: int, k: float) -> int:
@@ -49,9 +54,9 @@ class Fleet:
     """Парк водителей: единственный источник движения машин симулятора (§3.5).
 
     Хранение — плоский список ``Driver`` по возрастанию ``id``; все итерации —
-    по возрастанию ``id`` (§3.7). Зона занятого водителя меняется ровно один
-    раз — при высадке, на зону назначения заказа; до высадки занятый числится
-    в зоне, где был свободен на момент назначения.
+    по возрастанию ``id`` (§3.7). Зона водителя меняется только при высадке
+    (на зону назначения заказа) и при прибытии из переезда (на зону цели); до
+    этого занятый числится в зоне, где был свободен.
     """
 
     def __init__(self, count: int, zone_count: int) -> None:
@@ -72,6 +77,12 @@ class Fleet:
         # при назначении через _plan_trip; публичные сигнатуры Б и поля
         # Driver не расширяются.
         self._trip_plans: dict[int, tuple[int, int]] = {}
+        # Приватный канал переездов (change m6-supply-response): зона цели на
+        # водителя, заполняется relocate; публичные поля Driver не расширяются.
+        self._relocate_dests: dict[int, int] = {}
+        # Прибытия последнего tick() — отдельный от высадок канал (спека
+        # simulator-drivers): в список высадок tick() они не попадают.
+        self._arrivals: list[tuple[int, int]] = []
 
     def nearest_free(self, zone: int, path_row: np.ndarray) -> int | None:
         """Свободный водитель с минимальным временем подачи; при равенстве — меньший id (§3.5).
@@ -103,6 +114,37 @@ class Fleet:
         driver.trip_id = trip_id
         driver.remaining_min = pickup_min
 
+    def relocate(self, driver_id: int, dest_zone: int, minutes: int) -> None:
+        """Отправить свободного водителя в порожний переезд (change ``m6-supply-response``).
+
+        Свободный водитель переходит в ``RELOCATING`` с ``remaining_min =
+        minutes`` и ``trip_id = None``; зона до прибытия не меняется — в
+        исходной зоне он числится занятым. ``minutes`` вычисляет вызывающая
+        сторона по общей формуле ``ceil(путь × k)``, минимум 1 минута. Вызов
+        для несвободного водителя — ``ValueError``, состояние парка не
+        меняется. Переезд не отменяется до прибытия (спека simulator-drivers).
+        """
+
+        driver = self._drivers[driver_id]
+        if driver.state is not DriverState.FREE:
+            raise ValueError(
+                f"переезд запрещён: водитель {driver_id} в состоянии "
+                f"{driver.state.value}, нужен free"
+            )
+        driver.state = DriverState.RELOCATING
+        driver.trip_id = None
+        driver.remaining_min = minutes
+        self._relocate_dests[driver_id] = dest_zone
+
+    def arrivals(self) -> list[tuple[int, int]]:
+        """Прибытия последнего ``tick()``: ``(driver_id, зона_цели)`` по возрастанию id.
+
+        Отдельный от высадок канал (design, решение 5): движок в шаге 4
+        забирает прибытия и возвращает водителей в зеркало свободных.
+        """
+
+        return list(self._arrivals)
+
     def _plan_trip(self, driver_id: int, dest: int, trip_min: int) -> None:
         """Сообщить парку план поездки: зона назначения и длительность (приватный канал).
 
@@ -119,12 +161,15 @@ class Fleet:
         Один проход по занятым по возрастанию ``id``, ``remaining_min -= 1``;
         исчерпание у ``TO_PICKUP`` — посадка (``ON_TRIP``), у ``ON_TRIP`` —
         высадка: ``FREE``, зона = зона назначения из плана поездки, ``trip_id
-        = None``. Переход ровно один за тик (правило «минимум 1 минута»,
-        §10.5): у только что пересевшего в машину счётчик >= 1 и в этом же
-        тике не уменьшается второй раз. Возвращает высадки минуты — пары
-        ``(driver_id, зона_высадки)`` по возрастанию ``driver_id``.
+        = None``; у ``RELOCATING`` — прибытие: ``FREE`` в зоне цели, вне
+        списка высадок. Переход ровно один за тик (правило «минимум 1
+        минута», §10.5): у только что пересевшего в машину счётчик >= 1 и в
+        этом же тике не уменьшается второй раз. Возвращает высадки минуты —
+        пары ``(driver_id, зона_высадки)`` по возрастанию ``driver_id``;
+        прибытия — через ``arrivals()``.
         """
         dropoffs: list[tuple[int, int]] = []
+        arrivals: list[tuple[int, int]] = []
         for driver in self._drivers:
             if driver.state is DriverState.FREE:
                 continue
@@ -135,7 +180,7 @@ class Fleet:
                 # Посадка: длительность поездки берётся из плана, не тикает в этом же вызове.
                 driver.state = DriverState.ON_TRIP
                 driver.remaining_min = self._trip_plans[driver.id][1]
-            else:
+            elif driver.state is DriverState.ON_TRIP:
                 # Высадка: водитель свободен в зоне назначения заказа (§3.5).
                 dest = self._trip_plans.pop(driver.id)[0]
                 driver.state = DriverState.FREE
@@ -143,6 +188,16 @@ class Fleet:
                 driver.trip_id = None
                 driver.remaining_min = 0
                 dropoffs.append((driver.id, dest))
+            else:
+                # Прибытие из переезда: свободен в зоне цели, вне списка высадок.
+                dest = self._relocate_dests.pop(driver.id)
+                driver.state = DriverState.FREE
+                driver.zone = dest
+                driver.trip_id = None
+                driver.remaining_min = 0
+                arrivals.append((driver.id, dest))
+        # Обход по возрастанию id даёт прибытия в нужном порядке спеки.
+        self._arrivals = arrivals
         return dropoffs
 
     def free_by_zone(self) -> np.ndarray:
@@ -154,7 +209,7 @@ class Fleet:
         return counts
 
     def busy_by_zone(self) -> np.ndarray:
-        """Число занятых водителей (to_pickup и on_trip) по зонам: массив длины Z, dtype int."""
+        """Число занятых (to_pickup, on_trip, relocating) по зонам: массив длины Z, dtype int."""
         counts = np.zeros(self._zone_count, dtype=int)
         for driver in self._drivers:
             if driver.state is not DriverState.FREE:

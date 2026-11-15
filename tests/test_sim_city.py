@@ -98,7 +98,7 @@ def test_config_defaults_match_canon_a11() -> None:
     for profile in cfg.demand.profiles.values():
         assert len(profile["weekday"]) == 24
         assert len(profile["weekend"]) == 24
-    assert cfg.drivers.count == 200
+    assert cfg.drivers.count == 380
     assert cfg.drivers.wait_limit_min == 6
     assert cfg.weather.rain_day_chance == 0.15
     assert cfg.events.friday_evening.days == [4, 5]

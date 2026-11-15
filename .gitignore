@@ -24,3 +24,16 @@ artifacts/
 .worktrees/
 *.egg-info/
 .zcode/workflow-drafts/
+
+# Служебные каталоги ИИ-ассистентов и оркестрации (локальный инструментарий, не код проекта)
+.claude/
+.cursor/
+.opencode/
+.zcode/
+
+# Lock-файл uv (проект ставится через pip: make install)
+uv.lock
+
+# IDE
+.vscode/
+.idea/
