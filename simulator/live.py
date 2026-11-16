@@ -73,6 +73,20 @@ class ExpiryEvent:
 
 
 @dataclass(frozen=True)
+class CancelEvent:
+    """Отказ пассажира от долгой подачи в минуту записи (шаг 3 цикла §3.7).
+
+    ``pickup_min`` — подача отвергнутого водителя: заказ терминален, водитель
+    остаётся свободным. События идут в порядке обхода очереди диспатча
+    (change ``world-dispatch-radius``).
+    """
+
+    internal_id: int
+    origin: int
+    pickup_min: int
+
+
+@dataclass(frozen=True)
 class MinuteRecord:
     """Запись одной сим-минуты: среда на минуту и события минуты.
 
@@ -83,6 +97,11 @@ class MinuteRecord:
     снапшот числа свободных водителей по зонам на конец минуты кортежем по
     возрастанию ``zone_id``. События минуты упорядочены по порядку обработки
     цикла; в записях дренажа хвоста ``spawns``/``assignments`` пусты.
+    ``cancellations`` — отказы пассажиров (change ``world-dispatch-radius``),
+    поле добавлено последним с дефолтом: существующие конструкторы не ломаются.
+    ``online_drivers`` — число водителей на смене (в любом состоянии, кроме
+    ``offline``, включая помеченных к уходу) на конец минуты (change
+    ``world-driver-shifts``); поле тоже добавлено последним с дефолтом.
     """
 
     t: datetime
@@ -93,3 +112,5 @@ class MinuteRecord:
     assignments: tuple[AssignEvent, ...]
     dropoffs: tuple[DropoffEvent, ...]
     expiries: tuple[ExpiryEvent, ...]
+    cancellations: tuple[CancelEvent, ...] = ()
+    online_drivers: int = 0

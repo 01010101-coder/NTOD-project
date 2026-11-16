@@ -14,6 +14,7 @@ replay`` — снимок минуты совпадает с активными 
 import time
 
 from app.replay import ReplayLog, snapshot_at, start_fill
+from app.server import record_to_dict
 from common.config import AppConfig
 from common.timeutil import add_minutes, from_iso
 from simulator.engine import Engine
@@ -180,6 +181,53 @@ def test_snapshot_matches_manual_replay():
     assert empty["active_trips"] == []
     assert empty["pending_orders"] == []
     assert empty["free_by_zone"] == list(quiet.record(0).free_by_zone)
+
+
+def test_cancellations_serialized_and_removed_from_pending():
+    """Отказы сериализуются; снимок минуты отказа не держит заказ в ожидании (5.2)."""
+
+    cfg = micro_config(
+        city={
+            "zones": [MICRO_ZONES[0], {**MICRO_ZONES[1], "attract_origin": 0.0}],
+            "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 5.0}],
+        },
+        population={"scale": 50.0},
+        drivers={
+            "count": 3,
+            "wait_limit_min": 6,
+            "dispatch": {
+                "cancel_grace_min": 0,
+                "cancel_prob_per_min": 1.0,
+                "cancel_max_prob": 1.0,
+            },
+        },
+    )
+    log = ReplayLog()
+    fill_sync(log, cfg, 30 / 1440)
+
+    index = next(i for i in range(log.filled) if log.record(i).cancellations)
+    record = log.record(index)
+    payload = record_to_dict(record)
+    expected = [
+        {
+            "internal_id": event.internal_id,
+            "origin": event.origin,
+            "pickup_min": event.pickup_min,
+        }
+        for event in record.cancellations
+    ]
+    assert payload["cancellations"] == expected
+    assert expected and all(item["pickup_min"] >= 1 for item in expected)
+
+    cancelled_ids = {item["internal_id"] for item in expected}
+    snapshot = snapshot_at(log, index)
+    pending_ids = {order["internal_id"] for order in snapshot["pending_orders"]}
+    assert cancelled_ids.isdisjoint(pending_ids)
+
+    # При выключенных отказах список сериализуется пустым.
+    quiet = ReplayLog()
+    fill_sync(quiet, micro_config(population={"scale": 50.0}), 5 / 1440)
+    assert record_to_dict(quiet.record(4))["cancellations"] == []
 
 
 def test_background_fill_and_determinism():

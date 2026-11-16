@@ -319,6 +319,7 @@ def test_ws_connect_play_pause():
             controller.tick(dt=1.0)  # скорость 1 сим-мин/сек → playhead 1
             batch = receive_until(ws, "records")
             assert [record["t"] for record in batch["records"]] == ["2026-11-02 00:01:00"]
+            assert batch["records"][0]["online_drivers"] == cfg.drivers.count
             assert batch["from_index"] == 1
 
             ws.send_json({"cmd": "pause"})

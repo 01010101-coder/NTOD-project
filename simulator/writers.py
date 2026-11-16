@@ -73,8 +73,14 @@ def print_progress(t, trips_so_far: int, elapsed_sec: float) -> None:
     )
 
 
-def print_summary(summary, db_path: str) -> None:
-    """Сводка прогона: ровно 4 строки формата §4 в stdout (A4)."""
+def print_summary(summary, db_path: str, *, cancel_enabled: bool = False) -> None:
+    """Сводка прогона: 4 строки формата §4 в stdout, пятая — при отказах.
+
+    ``cancel_enabled`` (change ``world-dispatch-radius``) печатает строку
+    ``cancel: ...`` перед ``wall:`` — только когда в конфиге включены отказы
+    пассажиров (``drivers.dispatch.cancel_prob_per_min > 0``). При дефолтах
+    вывод остаётся ровно 4 строки, и скрипт приёмки M2 не меняется.
+    """
 
     total = summary.trips_total
     completed_share = 100.0 * summary.completed / total if total else 0.0
@@ -87,4 +93,8 @@ def print_summary(summary, db_path: str) -> None:
     print(
         f"wait: avg_wait_min={summary.avg_wait_min:.2f} deficit_share={summary.deficit_share:.1f}%"
     )
+    if cancel_enabled:
+        print(
+            f"cancel: cancelled={summary.cancelled} cancelled_share={summary.cancelled_share:.1f}%"
+        )
     print(f"wall: {summary.wall_sec:.1f}s")

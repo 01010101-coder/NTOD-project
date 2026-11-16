@@ -321,6 +321,14 @@
         world.flashes.push({ zone: event.origin, born: world.clock });
       }
     }
+    // Отказ пассажира от долгой подачи (change world-dispatch-radius): маркер
+    // ожидания гаснет, в зоне происхождения — та же вспышка, что у истечения.
+    for (const event of rec.cancellations) {
+      if (world.pending.delete(event.internal_id)) {
+        world.winExpiries[event.origin] += 1;
+        world.flashes.push({ zone: event.origin, born: world.clock });
+      }
+    }
     // Окно [index-4, index] закрылось: снапшот парка этой записи — его
     // последняя минута, тот же момент, что snapshot_drivers движка.
     if (index % AGG_STEP === AGG_STEP - 1) closeWindows();

@@ -236,12 +236,129 @@ class RepositionCfg(_CfgBase):
     max_reach_min: int = Field(default=12, ge=1)
 
 
+class DispatchCfg(_CfgBase):
+    """Диспатч (change ``world-dispatch-radius``): радиус поиска и отказ пассажира.
+
+    ``max_pickup_min`` — максимальная длительность подачи в минутах; ``None``
+    (дефолт) — без ограничения. ``cancel_grace_min`` — подача, которую пассажир
+    терпит без риска отказа; ``cancel_prob_per_min`` — прирост вероятности
+    отказа за каждую минуту сверх терпения (``0.0`` — отказов нет);
+    ``cancel_max_prob`` — потолок вероятности. Дефолты выключают оба механизма,
+    поэтому мир побитово совпадает с поведением до change'а.
+    """
+
+    max_pickup_min: int | None = Field(default=None, ge=1)
+    cancel_grace_min: int = Field(default=5, ge=0)
+    cancel_prob_per_min: float = Field(default=0.0, ge=0.0)
+    cancel_max_prob: float = Field(default=0.9, ge=0.0, le=1.0)
+
+
+# Почасовые доли парка на смене (change ``world-driver-shifts``): элемент h —
+# доля ``drivers.count`` на смене в момент h:00. Значения — стартовые числа
+# спеки ``config-loading``, калибруются отдельно (design.md, риск 1).
+_SHIFT_WEEKDAY: list[float] = [
+    0.40,
+    0.35,
+    0.33,
+    0.33,
+    0.33,
+    0.40,
+    0.55,
+    0.70,
+    0.80,
+    0.80,
+    0.75,
+    0.70,
+    0.70,
+    0.70,
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.85,
+    0.80,
+    0.72,
+    0.65,
+    0.55,
+    0.45,
+]
+
+_SHIFT_WEEKEND: list[float] = [
+    0.50,
+    0.45,
+    0.40,
+    0.35,
+    0.33,
+    0.33,
+    0.40,
+    0.50,
+    0.60,
+    0.65,
+    0.70,
+    0.70,
+    0.70,
+    0.70,
+    0.70,
+    0.72,
+    0.75,
+    0.80,
+    0.80,
+    0.78,
+    0.72,
+    0.68,
+    0.62,
+    0.55,
+]
+
+
+class OnlineShareCfg(_CfgBase):
+    """Почасовая доля парка на смене: будни и выходные — ровно 24 значения в (0, 1].
+
+    Профиль — стартовое значение спеки (change ``world-driver-shifts``);
+    значения калибруются отдельно. Валидация длины и диапазона даёт ошибку с
+    путём до поля профиля (``drivers.shifts.online_share.weekday``).
+    """
+
+    weekday: list[float] = Field(default_factory=lambda: list(_SHIFT_WEEKDAY))
+    weekend: list[float] = Field(default_factory=lambda: list(_SHIFT_WEEKEND))
+
+    @field_validator("weekday", "weekend")
+    @classmethod
+    def _check_profile(cls, value: list[float]) -> list[float]:
+        """Профиль обязан содержать ровно 24 доли, каждая в (0, 1]."""
+
+        if len(value) != 24:
+            raise ValueError(
+                f"профиль доли парка на смене должен содержать ровно 24 значения, "
+                f"получено {len(value)}"
+            )
+        for hour, share in enumerate(value):
+            if not 0.0 < share <= 1.0:
+                raise ValueError(
+                    f"доля парка на смене в час {hour} должна лежать в (0, 1], получено {share}"
+                )
+        return value
+
+
+class ShiftsCfg(_CfgBase):
+    """Смены водителей (change ``world-driver-shifts``): флаг и профиль по часам.
+
+    При ``enabled = false`` (дефолт) шаг смен в движке пропускается целиком, и
+    мир побитово совпадает с поведением до change'а.
+    """
+
+    enabled: bool = False
+    online_share: OnlineShareCfg = Field(default_factory=OnlineShareCfg)
+
+
 class DriversCfg(_CfgBase):
     """Парк водителей: размер, лимит ожидания назначения и отклик на тариф."""
 
     count: int = 380  # финальное число калибровки m2-calibration
     wait_limit_min: int = 6
     reposition: RepositionCfg = Field(default_factory=RepositionCfg)
+    dispatch: DispatchCfg = Field(default_factory=DispatchCfg)
+    shifts: ShiftsCfg = Field(default_factory=ShiftsCfg)
 
 
 class WeatherCfg(_CfgBase):

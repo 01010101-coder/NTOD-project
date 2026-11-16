@@ -16,12 +16,15 @@ from pydantic import ValidationError
 from common.config import (
     AppCfg,
     AppConfig,
+    DispatchCfg,
     DriversCfg,
     EngineCfg,
     MlCfg,
+    OnlineShareCfg,
     PolicyCfg,
     PolicyStairCfg,
     RepositionCfg,
+    ShiftsCfg,
     StorageCfg,
     load_config,
 )
@@ -308,3 +311,177 @@ def test_reposition_invalid_values_rejected(payload: dict) -> None:
 
     with pytest.raises(ValidationError):
         AppConfig.model_validate({"drivers": {"reposition": payload}})
+
+
+# --- Подсекция диспатча drivers.dispatch (change world-dispatch-radius) ---
+
+
+def test_dispatch_defaults_without_subsection(tmp_path: Path) -> None:
+    """Старый конфиг без ``drivers.dispatch`` грузится: механизмы выключены."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("drivers: {count: 380, wait_limit_min: 6}\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.drivers.dispatch == DispatchCfg()
+    assert cfg.drivers.dispatch.max_pickup_min is None
+    assert cfg.drivers.dispatch.cancel_prob_per_min == 0.0
+
+
+def test_dispatch_partial_subsection(tmp_path: Path) -> None:
+    """Частичная подсекция: заданное поле из файла, остальные — дефолты."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "drivers:\n  dispatch:\n    max_pickup_min: 12\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.drivers.dispatch.max_pickup_min == 12
+    assert cfg.drivers.dispatch.cancel_grace_min == 5
+    assert cfg.drivers.dispatch.cancel_prob_per_min == 0.0
+    assert cfg.drivers.dispatch.cancel_max_prob == 0.9
+
+
+def test_dispatch_unknown_key_rejected() -> None:
+    """Неизвестный ключ внутри ``dispatch`` отклоняется с полным путём."""
+
+    with pytest.raises(ValidationError, match="drivers.dispatch.max_pickup"):
+        AppConfig.model_validate({"drivers": {"dispatch": {"max_pickup": 10}}})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"max_pickup_min": 0},
+        {"cancel_prob_per_min": -0.1},
+        {"cancel_max_prob": 1.5},
+    ],
+)
+def test_dispatch_invalid_values_rejected(payload: dict) -> None:
+    """Значения вне допустимых диапазонов отклоняются ошибкой валидации."""
+
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"drivers": {"dispatch": payload}})
+
+
+# --- Подсекция смен drivers.shifts (change world-driver-shifts) ---
+
+DEFAULT_WEEKDAY_SHARE = [
+    0.40,
+    0.35,
+    0.33,
+    0.33,
+    0.33,
+    0.40,
+    0.55,
+    0.70,
+    0.80,
+    0.80,
+    0.75,
+    0.70,
+    0.70,
+    0.70,
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.85,
+    0.80,
+    0.72,
+    0.65,
+    0.55,
+    0.45,
+]
+
+DEFAULT_WEEKEND_SHARE = [
+    0.50,
+    0.45,
+    0.40,
+    0.35,
+    0.33,
+    0.33,
+    0.40,
+    0.50,
+    0.60,
+    0.65,
+    0.70,
+    0.70,
+    0.70,
+    0.70,
+    0.70,
+    0.72,
+    0.75,
+    0.80,
+    0.80,
+    0.78,
+    0.72,
+    0.68,
+    0.62,
+    0.55,
+]
+
+
+def test_shifts_defaults_without_subsection(tmp_path: Path) -> None:
+    """Старый конфиг без ``drivers.shifts`` грузится: дефолты, смены выключены."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("drivers: {count: 380, wait_limit_min: 6}\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.drivers.shifts == ShiftsCfg()
+    assert cfg.drivers.shifts.enabled is False
+    assert cfg.drivers.shifts.online_share.weekday == DEFAULT_WEEKDAY_SHARE
+    assert cfg.drivers.shifts.online_share.weekend == DEFAULT_WEEKEND_SHARE
+
+
+def test_shifts_partial_subsection(tmp_path: Path) -> None:
+    """Сценарий «Частичная подсекция»: задан только ``enabled``, профили — дефолты."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("drivers:\n  shifts:\n    enabled: true\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.drivers.shifts.enabled is True
+    assert cfg.drivers.shifts.online_share.weekday == DEFAULT_WEEKDAY_SHARE
+    assert cfg.drivers.shifts.online_share.weekend == DEFAULT_WEEKEND_SHARE
+
+
+def test_shifts_reference_config_equals_defaults() -> None:
+    """Эталонный ``config.yaml`` содержит подсекцию, равную дефолтам (задача 1.2)."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    assert cfg.drivers.shifts == ShiftsCfg()
+
+
+def test_shifts_profile_wrong_length_rejected() -> None:
+    """Сценарий «Профиль неверной длины отклоняется»: путь до поля в ошибке."""
+
+    with pytest.raises(ValidationError, match="online_share.weekday"):
+        AppConfig.model_validate(
+            {"drivers": {"shifts": {"online_share": {"weekday": DEFAULT_WEEKDAY_SHARE[:23]}}}}
+        )
+
+
+@pytest.mark.parametrize("bad_value", [0.0, 1.2])
+def test_shifts_profile_value_out_of_range_rejected(bad_value: float) -> None:
+    """Сценарий «Доля вне диапазона отклоняется»: 0 и 1.2."""
+
+    profile = list(DEFAULT_WEEKDAY_SHARE)
+    profile[3] = bad_value
+    with pytest.raises(ValidationError, match="online_share.weekday"):
+        AppConfig.model_validate({"drivers": {"shifts": {"online_share": {"weekday": profile}}}})
+
+
+def test_shifts_unknown_key_rejected() -> None:
+    """Сценарий «Неизвестный ключ отклоняется»: путь ``online_share.holidays``."""
+
+    with pytest.raises(ValidationError, match=r"drivers\.shifts\.online_share\.holidays"):
+        AppConfig.model_validate(
+            {"drivers": {"shifts": {"online_share": {"holidays": [1.0] * 24}}}}
+        )
+
+
+def test_online_share_defaults_are_independent_lists() -> None:
+    """Профили по умолчанию — новые списки на каждый экземпляр (нет общей мутации)."""
+
+    first, second = OnlineShareCfg(), OnlineShareCfg()
+    first.weekday[0] = 1.0
+    assert second.weekday[0] == DEFAULT_WEEKDAY_SHARE[0]

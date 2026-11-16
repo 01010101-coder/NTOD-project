@@ -20,13 +20,16 @@ class DriverState(enum.Enum):
     """Состояние водителя (§3.5): свободен, едет за заказом, везёт, порожняком.
 
     ``RELOCATING`` добавлен change'ем ``m6-supply-response``: водитель едет
-    порожняком в зону с более высоким тарифом и до прибытия занят.
+    порожняком в зону с более высоким тарифом и до прибытия занят. ``OFFLINE``
+    добавлен change'ем ``world-driver-shifts``: водитель не на смене, не
+    получает заказов, не переезжает и не тикает.
     """
 
     FREE = "free"
     TO_PICKUP = "to_pickup"
     ON_TRIP = "on_trip"
     RELOCATING = "relocating"
+    OFFLINE = "offline"
 
 
 @dataclass
@@ -83,6 +86,13 @@ class Fleet:
         # Прибытия последнего tick() — отдельный от высадок канал (спека
         # simulator-drivers): в список высадок tick() они не попадают.
         self._arrivals: list[tuple[int, int]] = []
+        # Метки ухода со смены (change world-driver-shifts): занятый водитель
+        # доезжает заказ/переезд и переходит в OFFLINE. Поля Driver не
+        # расширяются — тот же приём, что _trip_plans/_relocate_dests.
+        self._leaving: set[int] = set()
+        # Счётчик водителей вне смены: цель сверяется за O(1), полный проход
+        # по парку — только на минутах, где нужно кого-то вывести или впустить.
+        self._offline_count = 0
 
     def nearest_free(self, zone: int, path_row: np.ndarray) -> int | None:
         """Свободный водитель с минимальным временем подачи; при равенстве — меньший id (§3.5).
@@ -145,6 +155,86 @@ class Fleet:
 
         return list(self._arrivals)
 
+    def go_offline(self, driver_id: int) -> None:
+        """Снять свободного водителя со смены (change ``world-driver-shifts``).
+
+        Свободный водитель переходит в ``OFFLINE``; зона не меняется. Вызов
+        для несвободного водителя — ``ValueError``, состояние парка не
+        меняется.
+        """
+
+        driver = self._drivers[driver_id]
+        if driver.state is not DriverState.FREE:
+            raise ValueError(
+                f"уход со смены запрещён: водитель {driver_id} в состоянии "
+                f"{driver.state.value}, нужен free"
+            )
+        driver.state = DriverState.OFFLINE
+        driver.trip_id = None
+        driver.remaining_min = 0
+        self._offline_count += 1
+
+    def go_online(self, driver_id: int, zone: int) -> None:
+        """Вывести водителя из ``offline`` на смену свободным в зоне ``zone``.
+
+        Вызов для водителя не в ``OFFLINE`` — ``ValueError``, состояние парка
+        не меняется. Зона меняется на переданную (домашняя зона ``id mod Z``
+        выбирается движком).
+        """
+
+        driver = self._drivers[driver_id]
+        if driver.state is not DriverState.OFFLINE:
+            raise ValueError(
+                f"выход на смену запрещён: водитель {driver_id} в состоянии "
+                f"{driver.state.value}, нужен offline"
+            )
+        driver.state = DriverState.FREE
+        driver.zone = zone
+        driver.trip_id = None
+        driver.remaining_min = 0
+        self._offline_count -= 1
+
+    def mark_leaving(self, driver_id: int) -> None:
+        """Пометить занятого водителя к уходу со смены после текущей работы.
+
+        Водитель продолжает заказ или переезд без изменений; при высадке или
+        прибытии ``tick()`` переведёт его в ``OFFLINE``. Вызов для свободного
+        или ``offline`` водителя — ``ValueError``.
+        """
+
+        driver = self._drivers[driver_id]
+        if driver.state in (DriverState.FREE, DriverState.OFFLINE):
+            raise ValueError(
+                f"метка ухода запрещена: водитель {driver_id} в состоянии "
+                f"{driver.state.value}, нужен занятый водитель"
+            )
+        self._leaving.add(driver_id)
+
+    def unmark_leaving(self, driver_id: int) -> None:
+        """Снять метку ухода: водитель продолжает работу как обычно.
+
+        Вызов для водителя без метки — ``ValueError``.
+        """
+
+        if driver_id not in self._leaving:
+            raise ValueError(f"у водителя {driver_id} нет метки ухода")
+        self._leaving.discard(driver_id)
+
+    def is_leaving(self, driver_id: int) -> bool:
+        """Есть ли у водителя метка ухода со смены."""
+
+        return driver_id in self._leaving
+
+    def leaving_count(self) -> int:
+        """Число занятых водителей с меткой ухода (для сверки цели за O(1))."""
+
+        return len(self._leaving)
+
+    def offline_count(self) -> int:
+        """Число водителей вне смены (``OFFLINE``) — для сверки цели за O(1)."""
+
+        return self._offline_count
+
     def _plan_trip(self, driver_id: int, dest: int, trip_min: int) -> None:
         """Сообщить парку план поездки: зона назначения и длительность (приватный канал).
 
@@ -162,16 +252,19 @@ class Fleet:
         исчерпание у ``TO_PICKUP`` — посадка (``ON_TRIP``), у ``ON_TRIP`` —
         высадка: ``FREE``, зона = зона назначения из плана поездки, ``trip_id
         = None``; у ``RELOCATING`` — прибытие: ``FREE`` в зоне цели, вне
-        списка высадок. Переход ровно один за тик (правило «минимум 1
-        минута», §10.5): у только что пересевшего в машину счётчик >= 1 и в
-        этом же тике не уменьшается второй раз. Возвращает высадки минуты —
-        пары ``(driver_id, зона_высадки)`` по возрастанию ``driver_id``;
+        списка высадок. Водитель с меткой ухода при высадке или прибытии
+        переходит в ``OFFLINE`` в зоне цели, а пара всё равно попадает в
+        соответствующий канал — заказ довезён. Водители в ``OFFLINE`` не
+        тикают. Переход ровно один за тик (правило «минимум 1 минута»,
+        §10.5): у только что пересевшего в машину счётчик >= 1 и в этом же
+        тике не уменьшается второй раз. Возвращает высадки минуты — пары
+        ``(driver_id, зона_высадки)`` по возрастанию ``driver_id``;
         прибытия — через ``arrivals()``.
         """
         dropoffs: list[tuple[int, int]] = []
         arrivals: list[tuple[int, int]] = []
         for driver in self._drivers:
-            if driver.state is DriverState.FREE:
+            if driver.state in (DriverState.FREE, DriverState.OFFLINE):
                 continue
             driver.remaining_min -= 1
             if driver.remaining_min > 0:
@@ -181,17 +274,29 @@ class Fleet:
                 driver.state = DriverState.ON_TRIP
                 driver.remaining_min = self._trip_plans[driver.id][1]
             elif driver.state is DriverState.ON_TRIP:
-                # Высадка: водитель свободен в зоне назначения заказа (§3.5).
+                # Высадка: свободен в зоне назначения заказа (§3.5) либо, при
+                # метке ухода, уходит со смены (заказ всё равно довезён).
                 dest = self._trip_plans.pop(driver.id)[0]
-                driver.state = DriverState.FREE
+                if driver.id in self._leaving:
+                    self._leaving.discard(driver.id)
+                    driver.state = DriverState.OFFLINE
+                    self._offline_count += 1
+                else:
+                    driver.state = DriverState.FREE
                 driver.zone = dest
                 driver.trip_id = None
                 driver.remaining_min = 0
                 dropoffs.append((driver.id, dest))
             else:
-                # Прибытие из переезда: свободен в зоне цели, вне списка высадок.
+                # Прибытие из переезда: свободен в зоне цели, вне списка
+                # высадок; с меткой ухода — уходит со смены там же.
                 dest = self._relocate_dests.pop(driver.id)
-                driver.state = DriverState.FREE
+                if driver.id in self._leaving:
+                    self._leaving.discard(driver.id)
+                    driver.state = DriverState.OFFLINE
+                    self._offline_count += 1
+                else:
+                    driver.state = DriverState.FREE
                 driver.zone = dest
                 driver.trip_id = None
                 driver.remaining_min = 0
@@ -209,9 +314,15 @@ class Fleet:
         return counts
 
     def busy_by_zone(self) -> np.ndarray:
-        """Число занятых (to_pickup, on_trip, relocating) по зонам: массив длины Z, dtype int."""
+        """Число занятых (to_pickup, on_trip, relocating) по зонам: массив длины Z, dtype int.
+
+        Водители в ``OFFLINE`` вне смены не учитываются ни здесь, ни в
+        ``free_by_zone``; их число возвращает ``offline_count()``.
+        """
+
         counts = np.zeros(self._zone_count, dtype=int)
         for driver in self._drivers:
-            if driver.state is not DriverState.FREE:
-                counts[driver.zone] += 1
+            if driver.state in (DriverState.FREE, DriverState.OFFLINE):
+                continue
+            counts[driver.zone] += 1
         return counts

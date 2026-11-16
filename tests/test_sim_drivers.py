@@ -383,3 +383,207 @@ def test_arrivals_ascending_id() -> None:
 
     assert fleet.tick() == []  # прибытия не попадают в список высадок
     assert fleet.arrivals() == [(3, 4), (6, 3), (9, 5)]
+
+
+# --- Смены водителей (change world-driver-shifts, спека simulator-drivers) ---
+
+
+def test_go_offline_free_driver_immediately() -> None:
+    """Сценарий «Свободный уходит сразу»: offline в своей зоне, счётчики сдвинулись."""
+
+    fleet = Fleet(10, 6)  # водитель 3 — в зоне 3 (старт i mod Z)
+    before_free = fleet.free_by_zone().tolist()
+    before_busy = fleet.busy_by_zone().tolist()
+
+    fleet.go_offline(3)
+
+    driver = fleet._drivers[3]
+    assert driver.state is DriverState.OFFLINE
+    assert driver.zone == 3
+    assert driver.trip_id is None
+    assert driver.remaining_min == 0
+    assert fleet.free_by_zone().tolist()[3] == before_free[3] - 1
+    assert fleet.busy_by_zone().tolist() == before_busy
+    assert fleet.offline_count() == 1
+    assert fleet.nearest_free(3, np.ones(6, dtype=int)) != 3
+
+
+def test_busy_driver_leaves_after_dropoff() -> None:
+    """Сценарий «Занятый уходит после высадки»: третий tick — высадка и offline."""
+
+    fleet = Fleet(10, 6)
+    fleet.assign(3, 7, 1)  # подача 1
+    fleet._plan_trip(3, 2, 2)  # поездка 2
+    fleet.mark_leaving(3)
+    assert fleet.is_leaving(3)
+    assert fleet._drivers[3].state is DriverState.TO_PICKUP
+
+    assert fleet.tick() == []  # посадка
+    assert fleet.tick() == []
+    assert fleet.tick() == [(3, 2)]
+
+    driver = fleet._drivers[3]
+    assert driver.state is DriverState.OFFLINE
+    assert driver.zone == 2
+    assert driver.trip_id is None
+    assert not fleet.is_leaving(3)
+    assert fleet.offline_count() == 1
+    # В зоне 2 остаются свободными только водители 2 и 8 — ушедший не вернулся.
+    assert fleet.free_by_zone().tolist()[2] == 2
+
+
+def test_unmark_leaving_returns_normal_behavior() -> None:
+    """Сценарий «Снятая метка возвращает обычное поведение»: после высадки — free."""
+
+    fleet = Fleet(10, 6)
+    fleet.assign(3, 7, 1)
+    fleet._plan_trip(3, 2, 1)
+    fleet.mark_leaving(3)
+    fleet.unmark_leaving(3)
+    assert not fleet.is_leaving(3)
+
+    assert fleet.tick() == []  # посадка
+    assert fleet.tick() == [(3, 2)]
+    driver = fleet._drivers[3]
+    assert driver.state is DriverState.FREE
+    assert driver.zone == 2
+    assert fleet.offline_count() == 0
+
+
+def test_relocation_with_leaving_mark_goes_offline() -> None:
+    """Помеченный в переезде уходит в offline в зоне цели, прибытие остаётся в канале."""
+
+    fleet = Fleet(10, 6)
+    fleet.relocate(6, 5, 2)  # водитель 6 — в зоне 0
+    fleet.mark_leaving(6)
+
+    assert fleet.tick() == []
+    assert fleet.arrivals() == []
+    assert fleet.tick() == []
+    assert fleet.arrivals() == [(6, 5)]
+
+    driver = fleet._drivers[6]
+    assert driver.state is DriverState.OFFLINE
+    assert driver.zone == 5
+    assert not fleet.is_leaving(6)
+    assert fleet.offline_count() == 1
+
+
+def test_go_online_in_given_zone() -> None:
+    """Сценарий «Выход на смену в заданной зоне»: free в зоне 0, счётчик вырос."""
+
+    fleet = Fleet(10, 6)
+    fleet.go_offline(2)  # водитель 2 — в зоне 2
+    before = fleet.free_by_zone().tolist()
+
+    fleet.go_online(2, 0)
+
+    driver = fleet._drivers[2]
+    assert driver.state is DriverState.FREE
+    assert driver.zone == 0
+    assert fleet.free_by_zone().tolist()[0] == before[0] + 1
+    assert fleet.offline_count() == 0
+
+
+def test_invalid_shift_transitions_rejected() -> None:
+    """Сценарий «Недопустимые переходы отклоняются»: состояние парка не меняется."""
+
+    # go_offline для занятого водителя.
+    fleet = Fleet(10, 6)
+    fleet.assign(0, 1, 2)
+    with pytest.raises(ValueError, match="уход со смены запрещён"):
+        fleet.go_offline(0)
+    assert fleet._drivers[0].state is DriverState.TO_PICKUP
+
+    # go_online для свободного водителя.
+    with pytest.raises(ValueError, match="выход на смену запрещён"):
+        fleet.go_online(1, 0)
+    assert fleet._drivers[1].state is DriverState.FREE
+
+    # mark_leaving для свободного и для offline.
+    with pytest.raises(ValueError, match="метка ухода запрещена"):
+        fleet.mark_leaving(1)
+    fleet.go_offline(1)
+    with pytest.raises(ValueError, match="метка ухода запрещена"):
+        fleet.mark_leaving(1)
+    assert fleet._drivers[1].state is DriverState.OFFLINE
+
+    # relocate для offline.
+    with pytest.raises(ValueError, match="переезд запрещён"):
+        fleet.relocate(1, 3, 2)
+    assert fleet._drivers[1].state is DriverState.OFFLINE
+    assert fleet._drivers[1].zone == 1
+
+    # unmark_leaving без метки.
+    with pytest.raises(ValueError, match="нет метки ухода"):
+        fleet.unmark_leaving(2)
+
+
+def test_shift_departures_leave_counters() -> None:
+    """Сценарий «Уход со смены выводит водителя из счётчиков»."""
+
+    fleet = Fleet(10, 6)
+    total = lambda: int(  # noqa: E731
+        fleet.free_by_zone().sum() + fleet.busy_by_zone().sum() + fleet.offline_count()
+    )
+    assert total() == 10
+
+    fleet.go_offline(1)
+    assert int(fleet.free_by_zone().sum() + fleet.busy_by_zone().sum()) == 9
+    assert fleet.offline_count() == 1
+
+    fleet.assign(4, 5, 1)
+    fleet._plan_trip(4, 3, 1)
+    fleet.mark_leaving(4)
+    assert int(fleet.free_by_zone().sum() + fleet.busy_by_zone().sum()) == 9
+    fleet.tick()  # посадка
+    fleet.tick()  # высадка: помеченный уходит в offline
+    assert int(fleet.free_by_zone().sum() + fleet.busy_by_zone().sum()) == 8
+    assert fleet.offline_count() == 2
+    assert total() == 10
+
+
+def test_counters_sum_invariant_with_shifts_random_sequence() -> None:
+    """Инвариант ``free + busy + offline == count`` на случайной последовательности."""
+
+    rng = np.random.default_rng(20261116)
+    fleet = Fleet(50, 6)
+
+    def ids_in(*states: DriverState) -> list[int]:
+        return [driver.id for driver in fleet._drivers if driver.state in states]
+
+    next_trip = 1
+    for _ in range(300):
+        operation = int(rng.integers(0, 5))
+        free_ids = ids_in(DriverState.FREE)
+        offline_ids = ids_in(DriverState.OFFLINE)
+        busy_ids = ids_in(DriverState.TO_PICKUP, DriverState.ON_TRIP, DriverState.RELOCATING)
+        if operation == 0 and free_ids:
+            fleet.go_offline(int(rng.choice(free_ids)))
+        elif operation == 1 and offline_ids:
+            fleet.go_online(int(rng.choice(offline_ids)), int(rng.integers(0, 6)))
+        elif operation == 2 and free_ids:
+            driver_id = int(rng.choice(free_ids))
+            fleet.assign(driver_id, next_trip, int(rng.integers(1, 4)))
+            fleet._plan_trip(driver_id, int(rng.integers(0, 6)), int(rng.integers(1, 4)))
+            next_trip += 1
+        elif operation == 3 and free_ids:
+            fleet.relocate(
+                int(rng.choice(free_ids)),
+                int(rng.integers(0, 6)),
+                int(rng.integers(1, 4)),
+            )
+        elif operation == 4 and busy_ids:
+            driver_id = int(rng.choice(busy_ids))
+            if fleet.is_leaving(driver_id):
+                fleet.unmark_leaving(driver_id)
+            else:
+                fleet.mark_leaving(driver_id)
+        else:
+            fleet.tick()
+
+        assert (
+            int(fleet.free_by_zone().sum() + fleet.busy_by_zone().sum() + fleet.offline_count())
+            == 50
+        )
+        assert fleet.offline_count() == len(ids_in(DriverState.OFFLINE))

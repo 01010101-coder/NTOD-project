@@ -7,7 +7,9 @@ Guard до прогона: непустая таблица ``trips`` в целе
 exit 2 (``trip_id`` назначает SQLite при вставке батчей в порядке создания,
 §10.11, поэтому генерация требует пустой таблицы). Прогресс — раз в сим-час в
 stderr машинного формата ``[YYYY-MM-DD HH:MM] trips=N elapsed=X.Xs``; сводка —
-в stdout ровно 4 строки формата §4. Sqlite-реализация шва ``TripWriter``
+в stdout ровно 4 строки формата §4, а при включённых отказах пассажиров
+(``drivers.dispatch.cancel_prob_per_min > 0``) — пятая строка ``cancel:`` перед
+``wall:`` (change ``world-dispatch-radius``). Sqlite-реализация шва ``TripWriter``
 (§10.12), guard-сообщение и печати прогресса/сводки живут в общем модуле
 ``simulator.writers`` (change ``m6-rng-branches``) и переиспользуются отсюда
 импортом — тот же формат §4 использует CLI ``simulator.branches``; логики мира
@@ -64,7 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     summary = Engine(cfg, seed=seed).run(args.days, SqliteTripWriter(conn), progress=print_progress)
-    print_summary(summary, db_path)
+    print_summary(
+        summary,
+        db_path,
+        cancel_enabled=cfg.drivers.dispatch.cancel_prob_per_min > 0.0,
+    )
 
     if args.csv:
         os.makedirs(args.csv, exist_ok=True)

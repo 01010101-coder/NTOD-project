@@ -20,10 +20,14 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from common.config import AppConfig, load_config
+import pytest
+
+from common.config import AppConfig, DispatchCfg, load_config
 from common.timeutil import add_minutes, bucket5, from_iso
-from simulator.aggregate import AggregateBuffer
-from simulator.engine import Engine
+from simulator.aggregate import AggregateBuffer, _is_deficit
+from simulator.drivers import DriverState
+from simulator.engine import Engine, _cancel_prob
+from simulator.shifts import online_target
 
 SIM_START = "2026-11-02"
 SIM_START_DT = from_iso(f"{SIM_START} 00:00:00")
@@ -526,3 +530,496 @@ def test_response_counters_sum_invariant() -> None:
     assert totals
     for free, busy in totals.values():
         assert free + busy == cfg.drivers.count
+
+
+# --- Радиус поиска и отказ пассажира (change world-dispatch-radius) ---
+
+
+def pickup_minutes(trip: dict) -> int:
+    """Фактическая подача строки ``trips`` в минутах: ``pickup_at − assigned_at + 1``."""
+
+    return (
+        int((from_iso(trip["pickup_at"]) - from_iso(trip["assigned_at"])).total_seconds() // 60) + 1
+    )
+
+
+def _reference_with_dispatch(**overrides) -> AppConfig:
+    """Эталонный конфиг с переопределениями подсекции ``drivers.dispatch``."""
+
+    cfg = load_config(REFERENCE_CONFIG).model_copy(deep=True)
+    for field, value in overrides.items():
+        setattr(cfg.drivers.dispatch, field, value)
+    return cfg
+
+
+def test_driver_outside_radius_not_assigned() -> None:
+    """Свободная машина за радиусом не назначается, заказ истекает, водитель свободен."""
+
+    # Зона 0 — только стартовая зона единственного водителя (спроса нет); заказы
+    # рождаются в зоне 1, путь 0→1 = 30 минут > радиуса 10.
+    world = micro_config(
+        city={
+            "zones": [{**MICRO_ZONES[0], "attract_origin": 0.0}, MICRO_ZONES[1]],
+            "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 30.0}],
+        },
+        population={"scale": 50.0},
+        drivers={
+            "count": 1,
+            "wait_limit_min": 6,
+            "dispatch": {"max_pickup_min": 10},
+        },
+    )
+    writer = run_minutes(world, 20)
+
+    assert writer.trips
+    assert all(trip["status"] == "unfulfilled" for trip in writer.trips)
+    # Водитель не поехал: в зоне 0 он свободен на каждом снапшоте.
+    assert all(row["free_drivers"] == 1 for row in writer.metrics if row["zone_id"] == 0)
+
+
+def test_rain_narrows_radius() -> None:
+    """Дождь сужает радиус: путь 9 минут × 1.4 = 13 > 10 — назначения нет."""
+
+    def world(*, rain: bool) -> AppConfig:
+        return micro_config(
+            city={
+                "zones": [{**MICRO_ZONES[0], "attract_origin": 0.0}, MICRO_ZONES[1]],
+                "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 9.0}],
+            },
+            population={"scale": 50.0},
+            drivers={
+                "count": 1,
+                "wait_limit_min": 6,
+                "dispatch": {"max_pickup_min": 10},
+            },
+            weather={
+                "rain_day_chance": 1.0 if rain else 0.0,
+                "episode_start_h": [0, 0],
+                "episode_duration_h": [1, 1],
+            },
+        )
+
+    dry = run_minutes(world(rain=False), 20)
+    completed_dry = [trip for trip in dry.trips if trip["status"] == "completed"]
+    assert completed_dry
+    assert all(pickup_minutes(trip) == 9 for trip in completed_dry)
+
+    rainy = run_minutes(world(rain=True), 20)
+    assert rainy.trips
+    assert all(trip["status"] == "unfulfilled" for trip in rainy.trips)
+
+
+def test_order_outside_radius_does_not_block_queue() -> None:
+    """Заказ вне радиуса не мешает назначению следующего заказа той же минуты."""
+
+    # Зона 0 — стартовая зона водителя; зона 1 дальняя (30 мин), зона 2 близкая
+    # (5 мин). Внутренние id идут по возрастанию зоны, поэтому дальний заказ
+    # стоит в очереди первым, близкий — вторым.
+    world = micro_config(
+        city={
+            "zones": [
+                {**MICRO_ZONES[0], "attract_origin": 0.0},
+                MICRO_ZONES[1],
+                {
+                    "id": 2,
+                    "name": "c",
+                    "archetype": "mixed",
+                    "attract_origin": 1.0,
+                    "attract_dest": 1.0,
+                    "map": {"x": 20.0, "y": 0.0},
+                },
+            ],
+            "roads": [
+                {"from_zone": 0, "to_zone": 1, "minutes": 30.0},
+                {"from_zone": 0, "to_zone": 2, "minutes": 5.0},
+            ],
+        },
+        population={"scale": 100.0},
+        drivers={
+            "count": 1,
+            "wait_limit_min": 6,
+            "dispatch": {"max_pickup_min": 10},
+        },
+    )
+    writer = run_minutes(world, 20)
+
+    waited = [trip for trip in writer.trips if trip["status"] == "unfulfilled"]
+    assigned = [
+        trip for trip in writer.trips if trip["status"] == "completed" and trip["origin_zone"] == 2
+    ]
+    assert waited and assigned, "сценарий очереди не воспроизведён"
+    # Дальний заказ был в очереди в минуту назначения близкого: назначение
+    # близкого не заблокировано первым заказом.
+    assert any(
+        from_iso(far["created_at"])
+        <= from_iso(near["assigned_at"])
+        <= add_minutes(from_iso(far["created_at"]), world.drivers.wait_limit_min)
+        for far in waited
+        for near in assigned
+    )
+
+
+def test_completed_pickup_within_radius() -> None:
+    """Инвариант 1 суток seed 42 с радиусом 10: подача всех ``completed`` ≤ 10 минут."""
+
+    cfg = _reference_with_dispatch(max_pickup_min=10)
+    writer = StubWriter()
+    Engine(cfg, seed=REFERENCE_SEED).run(1, writer)
+
+    completed = [trip for trip in writer.trips if trip["status"] == "completed"]
+    assert completed
+    assert all(pickup_minutes(trip) <= 10 for trip in completed)
+
+
+def test_cancel_prob_formula() -> None:
+    """Вероятность отказа: 0 в пределах терпения, линейный рост, потолок."""
+
+    cfg = DispatchCfg(cancel_grace_min=5, cancel_prob_per_min=0.1, cancel_max_prob=0.9)
+    assert _cancel_prob(2, cfg) == 0.0
+    assert _cancel_prob(5, cfg) == 0.0
+    assert _cancel_prob(8, cfg) == pytest.approx(0.3)
+    assert _cancel_prob(20, cfg) == pytest.approx(0.9)
+    assert _cancel_prob(20, DispatchCfg()) == 0.0
+
+
+def test_pickup_within_grace_not_drawn() -> None:
+    """Подача в пределах терпения не разыгрывается: p = 0, заказ назначается."""
+
+    world = micro_config(
+        city={
+            "zones": [{**MICRO_ZONES[0], "attract_origin": 0.0}, MICRO_ZONES[1]],
+            "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 5.0}],
+        },
+        population={"scale": 50.0},
+        drivers={
+            "count": 1,
+            "wait_limit_min": 6,
+            "dispatch": {
+                "cancel_grace_min": 5,
+                "cancel_prob_per_min": 0.1,
+                "cancel_max_prob": 0.9,
+            },
+        },
+    )
+    writer = StubWriter()
+    summary = Engine(world).run(20 / 1440, writer)
+
+    assert summary.cancelled == 0
+    assert not any(trip["status"] == "cancelled" for trip in writer.trips)
+    completed = [trip for trip in writer.trips if trip["status"] == "completed"]
+    assert completed
+    assert all(pickup_minutes(trip) == 5 for trip in completed)
+
+
+def test_cancellation_frees_driver_for_next_order() -> None:
+    """Отказ освобождает водителя: следующие заказы той же минуты получают его же."""
+
+    world = micro_config(
+        city={
+            "zones": [MICRO_ZONES[0], {**MICRO_ZONES[1], "attract_origin": 0.0}],
+            "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 5.0}],
+        },
+        population={"scale": 100.0},
+        drivers={
+            "count": 1,
+            "wait_limit_min": 6,
+            "dispatch": {
+                "cancel_grace_min": 0,
+                "cancel_prob_per_min": 1.0,
+                "cancel_max_prob": 1.0,
+            },
+        },
+    )
+    records: list = []
+    writer = StubWriter()
+    summary = Engine(world).run(10 / 1440, writer, on_minute=records.append)
+
+    assert summary.cancelled == len(writer.trips) > 0
+    for trip in writer.trips:
+        assert trip["status"] == "cancelled"
+        assert trip["assigned_at"] is None
+        assert trip["pickup_at"] is None
+        assert trip["dropoff_at"] is None
+    # Водитель не занят ни минуты: в каждой записи он свободен в зоне 0.
+    assert all(record.free_by_zone == (1, 0) for record in records)
+    # В одной минуте отказано нескольким заказам — водитель предложен повторно.
+    assert max(len(record.cancellations) for record in records) >= 2
+
+
+def test_cancellations_do_not_shift_spawn_or_env() -> None:
+    """Отказы не сдвигают спавн и среду: поминутные is_rain, тариф и заказы равны."""
+
+    minutes = 300
+
+    def snapshot(cfg: AppConfig) -> list:
+        records: list = []
+        Engine(cfg, seed=REFERENCE_SEED).run(minutes / 1440, StubWriter(), on_minute=records.append)
+        return records[:minutes]
+
+    off = snapshot(_reference_with_dispatch(cancel_prob_per_min=0.0))
+    on = snapshot(_reference_with_dispatch(cancel_prob_per_min=0.1))
+
+    assert any(record.cancellations for record in on), "отказы не разыграны"
+    assert [record.is_rain for record in on] == [record.is_rain for record in off]
+    assert [record.price_mult for record in on] == [record.price_mult for record in off]
+
+    def spawns(records: list) -> list:
+        return [
+            (record.t, spawn.origin, spawn.dest) for record in records for spawn in record.spawns
+        ]
+
+    assert spawns(on) == spawns(off)
+
+
+def test_cancellations_deterministic() -> None:
+    """Два прогона одного seed с отказами побайтово равны."""
+
+    cfg = _reference_with_dispatch(cancel_prob_per_min=0.1)
+    writer_a = StubWriter()
+    summary_a = Engine(cfg, seed=REFERENCE_SEED).run(0.25, writer_a)
+    writer_b = StubWriter()
+    summary_b = Engine(cfg, seed=REFERENCE_SEED).run(0.25, writer_b)
+
+    assert summary_a.cancelled == summary_b.cancelled > 0
+    assert _rows_digest(writer_a.trips) == _rows_digest(writer_b.trips)
+    assert _rows_digest(writer_a.metrics) == _rows_digest(writer_b.metrics)
+
+
+def test_summary_counts_cancelled() -> None:
+    """Summary сверяется со счётом статусов в строках; при дефолтах отказов нет."""
+
+    cfg = _reference_with_dispatch(cancel_prob_per_min=0.1)
+    writer = StubWriter()
+    summary = Engine(cfg, seed=REFERENCE_SEED).run(0.25, writer)
+
+    statuses = Counter(trip["status"] for trip in writer.trips)
+    assert summary.cancelled == statuses["cancelled"] > 0
+    assert summary.trips_total == summary.completed + summary.unfulfilled + summary.cancelled
+    assert summary.cancelled_share == pytest.approx(100.0 * summary.cancelled / summary.trips_total)
+
+    default = Engine(load_config(REFERENCE_CONFIG), seed=REFERENCE_SEED).run(0.05, StubWriter())
+    assert default.cancelled == 0
+    assert default.cancelled_share == 0.0
+
+
+def test_cancellations_count_in_unfulfilled() -> None:
+    """Отказы входят в unfulfilled агрегата и дают дефицит строки окна."""
+
+    # Зона 0: водитель рядом (подача 1 мин > терпения 0) — каждый заказ
+    # отменяется, водитель остаётся свободным. Зона 1: путь 30 > радиуса 10 —
+    # заказы не назначаются и истекают. В окне есть и истечения, и отказы.
+    world = micro_config(
+        city={
+            "zones": MICRO_ZONES,
+            "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 30.0}],
+        },
+        population={"scale": 100.0},
+        drivers={
+            "count": 1,
+            "wait_limit_min": 6,
+            "dispatch": {
+                "max_pickup_min": 10,
+                "cancel_grace_min": 0,
+                "cancel_prob_per_min": 1.0,
+                "cancel_max_prob": 1.0,
+            },
+        },
+    )
+    records: list = []
+    writer = StubWriter()
+    Engine(world).run(20 / 1440, writer, on_minute=records.append)
+
+    written = {(row["ts"], row["zone_id"]) for row in writer.metrics}
+    cancellations: Counter = Counter()
+    expiries: Counter = Counter()
+    for record in records:
+        window = bucket5(record.t)
+        if (window, 0) not in written:
+            continue
+        for event in record.cancellations:
+            cancellations[(window, event.origin)] += 1
+        for event in record.expiries:
+            expiries[(window, event.origin)] += 1
+
+    both = [
+        window for window, _zone in written if cancellations[(window, 0)] and expiries[(window, 1)]
+    ]
+    assert both, "нет окна с истечением и отказом одновременно"
+    rows = {(row["ts"], row["zone_id"]): row for row in writer.metrics}
+    window = both[0]
+    assert rows[(window, 0)]["unfulfilled"] == cancellations[(window, 0)]
+    assert rows[(window, 1)]["unfulfilled"] == expiries[(window, 1)]
+    assert _is_deficit(rows[(window, 0)])
+    assert _is_deficit(rows[(window, 1)])
+
+
+# --- Смены водителей в минутном цикле (change world-driver-shifts, задача 4) ---
+
+
+def _shift_profile(value: float) -> list[float]:
+    """Ровный профиль доли парка на смене: 24 одинаковых значения."""
+
+    return [value] * 24
+
+
+def _silent_shift_config(*, count: int, share: float, zones: int = 6) -> AppConfig:
+    """Эталонный конфиг без спавна и дождя, парк ``count`` и ровный профиль смен."""
+
+    cfg = load_config(REFERENCE_CONFIG).model_copy(deep=True)
+    cfg.drivers.count = count
+    cfg.drivers.shifts.enabled = True
+    cfg.drivers.shifts.online_share.weekday = _shift_profile(share)
+    cfg.drivers.shifts.online_share.weekend = _shift_profile(share)
+    cfg.population.scale = 0.0
+    cfg.weather.rain_day_chance = 0.0
+    return cfg
+
+
+def _micro_shift_config(**overrides) -> AppConfig:
+    """Микромир 2 зон со включёнными сменами (профиль по умолчанию)."""
+
+    drivers = {"count": 20, "wait_limit_min": 6, "shifts": {"enabled": True}}
+    drivers.update(overrides.pop("drivers", {}))
+    return micro_config(drivers=drivers, **overrides)
+
+
+def test_shifts_night_third_of_fleet() -> None:
+    """Сценарий «Ночью на смене треть парка»: 03:00 будней, 99 из 300."""
+
+    cfg = load_config(REFERENCE_CONFIG).model_copy(deep=True)
+    cfg.drivers.count = 300
+    cfg.drivers.shifts.enabled = True
+    cfg.population.scale = 0.0
+    cfg.weather.rain_day_chance = 0.0
+
+    records: list = []
+    Engine(cfg, seed=REFERENCE_SEED).run(181 / 1440, StubWriter(), on_minute=records.append)
+
+    night = records[180]
+    assert night.t == from_iso("2026-11-02 03:00:00")
+    assert night.online_drivers == 99
+
+
+def test_shifts_free_drivers_leave_first() -> None:
+    """Сценарий «Свободные уходят первыми»: 20 свободных, цель 15 — ушли id 15..19."""
+
+    cfg = _silent_shift_config(count=20, share=0.75)
+    engine = Engine(cfg, seed=REFERENCE_SEED)
+    records: list = []
+    engine.run(1 / 1440, StubWriter(), on_minute=records.append)
+
+    assert records[0].online_drivers == 15
+    offline = {
+        driver.id for driver in engine._fleet._drivers if driver.state is DriverState.OFFLINE
+    }
+    assert offline == {15, 16, 17, 18, 19}
+    assert engine._fleet.leaving_count() == 0  # все ушли свободными, меток нет
+
+
+def test_shifts_online_driver_home_zone_same_minute() -> None:
+    """Сценарий «Выход на смену в домашней зоне»: водитель 13 → зона 1."""
+
+    cfg = _silent_shift_config(count=20, share=1.0)
+    engine = Engine(cfg, seed=REFERENCE_SEED)
+    fleet = engine._fleet
+    # Водители 1 и 7 зоны 1 заняты — после выхода 13 он ближайший свободный.
+    for driver_id in (1, 7):
+        fleet.assign(driver_id, 100 + driver_id, 5)
+        fleet._plan_trip(driver_id, 3, 5)
+        engine._free_ids[1].remove(driver_id)
+    # Водитель 13 вне смены: цель 20 при 19 на смене впускает его.
+    fleet.go_offline(13)
+    engine._free_ids[1].remove(13)
+
+    engine._apply_shifts(from_iso("2026-11-02 00:01:00"))
+
+    driver = fleet._drivers[13]
+    assert driver.state is DriverState.FREE
+    assert driver.zone == 1  # 13 mod 6
+    assert 13 in engine._free_ids[1]
+    assert engine._nearest_free_id(1) == 13  # доступен диспатчу этой же минуты
+
+
+def test_shifts_online_follows_target() -> None:
+    """Сценарий «Число на смене следует цели»: 2 суток, поминутно online − метки = T(t)."""
+
+    cfg = _micro_shift_config(population={"scale": 50.0})
+    engine = Engine(cfg, seed=7)
+    observed: list[tuple[object, int]] = []
+    engine.run(
+        2,
+        StubWriter(),
+        on_minute=lambda record: observed.append((record, engine._fleet.leaving_count())),
+    )
+
+    main_phase = observed[: 2 * 1440]
+    assert len(main_phase) == 2 * 1440
+    for record, leaving in main_phase:
+        target = online_target(cfg.drivers, record.t)
+        assert record.online_drivers - leaving == target
+        assert record.online_drivers >= target
+
+
+def test_shifts_do_not_consume_rng() -> None:
+    """Сценарий «Смены не тратят rng»: дождь и последовательность спавна совпадают."""
+
+    def snapshot(enabled: bool) -> tuple[list, list, list]:
+        cfg = _micro_shift_config(
+            population={"scale": 50.0},
+            drivers={"count": 10, "shifts": {"enabled": enabled}},
+        )
+        records: list = []
+        Engine(cfg, seed=7).run(2 / 24, StubWriter(), on_minute=records.append)
+        main_phase = records[: 2 * 60]
+        rain = [record.is_rain for record in main_phase]
+        spawns = [
+            (record.t, spawn.origin, spawn.dest, spawn.price_multiplier)
+            for record in main_phase
+            for spawn in record.spawns
+        ]
+        online = [record.online_drivers for record in main_phase]
+        return rain, spawns, online
+
+    rain_off, spawns_off, online_off = snapshot(enabled=False)
+    rain_on, spawns_on, online_on = snapshot(enabled=True)
+
+    assert rain_on == rain_off
+    assert spawns_on == spawns_off
+    # Ветка смен действительно работала: парк на смене менялся.
+    assert set(online_on) != set(online_off)
+
+
+def test_shifts_deterministic() -> None:
+    """Сценарий «Смены детерминированы»: два прогона одного seed равны побайтово."""
+
+    cfg = _micro_shift_config(population={"scale": 50.0}, drivers={"count": 10})
+
+    def run() -> tuple[list[dict], list[dict]]:
+        writer = StubWriter()
+        Engine(cfg, seed=7).run(1, writer)
+        return writer.trips, writer.metrics
+
+    trips_a, metrics_a = run()
+    trips_b, metrics_b = run()
+    assert trips_a and metrics_a
+    assert trips_a == trips_b
+    assert metrics_a == metrics_b
+
+
+def test_shifts_night_load_higher() -> None:
+    """Сценарий «Ночная загрузка становится реалистичной»: 7 суток seed 42, 02–05 ч."""
+
+    def night_load(enabled: bool) -> float:
+        cfg = load_config(REFERENCE_CONFIG).model_copy(deep=True)
+        cfg.drivers.count = 60
+        cfg.drivers.shifts.enabled = enabled
+        writer = StubWriter()
+        Engine(cfg, seed=REFERENCE_SEED).run(7, writer)
+        buckets = [row for row in writer.metrics if 2 <= row["ts"].hour < 5]
+        assert buckets
+        return sum(
+            row["busy_drivers"] / max(row["free_drivers"] + row["busy_drivers"], 1)
+            for row in buckets
+        ) / len(buckets)
+
+    assert night_load(enabled=True) > night_load(enabled=False)

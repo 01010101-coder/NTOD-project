@@ -224,6 +224,23 @@ def test_generate_branch_a_base(tmp_path):
     assert all(mult == 1.0 or low <= mult <= high for mult in mults)
 
 
+def test_branch_summary_shows_cancellations(tmp_path, capsys):
+    """Сводка ветки печатает ``cancel:`` при включённых отказах (world-dispatch-radius)."""
+
+    cfg = load_config(REFERENCE_CONFIG).model_copy(deep=True)
+    cfg.drivers.dispatch.cancel_grace_min = 0
+    cfg.drivers.dispatch.cancel_prob_per_min = 0.5
+    db = tmp_path / "a-base.db"
+    summary = generate_branch("a-base", cfg, seed=SEED, days=1, db_path=str(db), shadow=False)
+
+    assert summary is not None and summary.cancelled > 0
+    lines = capsys.readouterr().out.strip().split("\n")
+    assert len(lines) == 5
+    assert re.fullmatch(r"cancel: cancelled=\d+ cancelled_share=\d+\.\d%", lines[3])
+    assert lines[4].startswith("wall: ")
+    assert f"total={summary.trips_total}" in lines[1]
+
+
 def test_generate_branch_unknown_branch_raises():
     """Неизвестное имя ветки: исключение с именем в сообщении, прогона нет (спека)."""
 

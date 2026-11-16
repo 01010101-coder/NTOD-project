@@ -5,13 +5,14 @@
 фиксированным порядком шагов (часть контракта детерминизма, §10.1), агрегирует
 город через ``simulator.aggregate.AggregateBuffer`` и отдаёт строки таблиц
 интерфейсу ``TripWriter`` — движок не знает про SQLite (§10.12). Вся случайность
-мира идёт через ДВА дочерних ``numpy.random.Generator``, высаженных из
-``np.random.SeedSequence(seed).spawn(2)`` в фиксированном порядке
-[эндогенный, экзогенный] (§3 плана M5+M6, ``docs/plan-m5-m6-policy.md``):
-эндогенный потребляют пуассоновский спавн и выбор назначения, экзогенный —
-суточные розыгрыши среды ``WorldEnv`` (дождь, surge-инъекции); расход
-эндогенного потока не сдвигает экзогенный, поэтому ветки одного seed с разными
-политиками цены сравнимы попарно. Wall-clock читается
+мира идёт через ТРИ дочерних ``numpy.random.Generator``, высаженных из
+``np.random.SeedSequence(seed).spawn(3)`` в фиксированном порядке
+[эндогенный, экзогенный, отказ пассажира] (§3 плана M5+M6,
+``docs/plan-m5-m6-policy.md``): эндогенный потребляют пуассоновский спавн и
+выбор назначения, экзогенный — суточные розыгрыши среды ``WorldEnv`` (дождь,
+surge-инъекции), третий — отказ пассажира от долгой подачи (change
+``world-dispatch-radius``); расход одного потока не сдвигает остальные, поэтому
+ветки одного seed с разными политиками цены сравнимы попарно. Wall-clock читается
 только по периметру ``run`` — для ``progress.elapsed_sec`` и ``Summary.wall_sec``
 (§5). Шов ``price_fn`` (§10.13) подменяет числовой тариф зон, не трогая
 розыгрыши среды: ``env.advance_day`` вызывается безусловно, экзогенный поток
@@ -27,18 +28,42 @@ from typing import Protocol
 
 import numpy as np
 
-from common.config import AppConfig
+from common.config import AppConfig, DispatchCfg
 from common.timeutil import add_minutes, bucket5, from_iso, to_iso
 from simulator.aggregate import AggregateBuffer, _is_deficit
 from simulator.city import build_city
 from simulator.demand import TripRequest, _is_expired, spawn_requests
-from simulator.drivers import Fleet, travel_minutes
+from simulator.drivers import DriverState, Fleet, travel_minutes
 from simulator.env import WorldEnv
-from simulator.live import AssignEvent, DropoffEvent, ExpiryEvent, MinuteRecord, SpawnEvent
+from simulator.live import (
+    AssignEvent,
+    CancelEvent,
+    DropoffEvent,
+    ExpiryEvent,
+    MinuteRecord,
+    SpawnEvent,
+)
 from simulator.reposition import plan_relocations
+from simulator.shifts import online_target
 
 _TERMINAL_COMPLETED = "completed"
 _TERMINAL_UNFULFILLED = "unfulfilled"
+_TERMINAL_CANCELLED = "cancelled"
+
+
+def _cancel_prob(pickup_min: int, cfg: DispatchCfg) -> float:
+    """Вероятность отказа пассажира от подачи ``pickup_min`` минут (спека simulator-loop).
+
+    ``p = min(cancel_max_prob, cancel_prob_per_min × max(0, pickup_min −
+    cancel_grace_min))``: в пределах терпения — 0 (розыгрыш не выполняется),
+    дальше вероятность растёт линейно и упирается в потолок. Чистая функция —
+    вынесена из шага 3, чтобы формулу можно было проверить без прогона мира.
+    """
+
+    if cfg.cancel_prob_per_min <= 0.0:
+        return 0.0
+    excess = max(0, pickup_min - cfg.cancel_grace_min)
+    return min(cfg.cancel_max_prob, cfg.cancel_prob_per_min * excess)
 
 
 class TripWriter(Protocol):
@@ -60,10 +85,13 @@ class Summary:
     """Итоги прогона (приложение Б): счётчики заказов, доли, время стены.
 
     ``unfulfilled_share`` — доля истёкших заказов прогона в процентах;
-    ``avg_wait_min`` — среднее ожидание назначения по всем назначенным заказам
-    (0.0 при отсутствии назначений — proposal, вопрос 2); ``deficit_share`` —
-    доля дефицитных 5-минуток по правилу §3.8 в процентах; ``wall_sec`` —
-    wall-время прогона (замер только по периметру ``run``, §5).
+    ``cancelled``/``cancelled_share`` — число и доля отказов пассажиров от
+    долгой подачи (change ``world-dispatch-radius``); ``trips_total`` включает
+    все три статуса. ``avg_wait_min`` — среднее ожидание назначения по всем
+    назначенным заказам (0.0 при отсутствии назначений — proposal, вопрос 2;
+    отказы не входят); ``deficit_share`` — доля дефицитных 5-минуток по
+    правилу §3.8 в процентах; ``wall_sec`` — wall-время прогона (замер только
+    по периметру ``run``, §5).
     """
 
     days: int
@@ -72,6 +100,8 @@ class Summary:
     completed: int
     unfulfilled: int
     unfulfilled_share: float
+    cancelled: int
+    cancelled_share: float
     avg_wait_min: float
     deficit_share: float
     wall_sec: float
@@ -97,8 +127,9 @@ class Engine:
     """Движок мира: минутный цикл §3.7 в фиксированном порядке (контракт детерминизма).
 
     Шаги каждой сим-минуты: (1) среда; (1а) поминутное накопление среды в буфер
-    агрегации (design, решение 3); (2) спавн; (3) диспатч; (3а) отклик
-    предложения — переезды свободных к надбавке при включённом
+    агрегации (design, решение 3); (1б) смены водителей при включённом
+    ``drivers.shifts`` (change ``world-driver-shifts``); (2) спавн; (3) диспатч;
+    (3а) отклик предложения — переезды свободных к надбавке при включённом
     ``drivers.reposition`` (change ``m6-supply-response``); (4) движение;
     (5) истечения; (6) на каждой ``agg_step_min``-й минуте — снапшот парка и
     сброс окна агрегата. Батчи строк writer'у уходят раз в сим-час (§5). После
@@ -114,14 +145,17 @@ class Engine:
         seed: int | None = None,
         price_fn: Callable[[int, datetime], float] | None = None,
     ) -> None:
-        """Собрать мир по конфигу: два rng-потока (§3 плана M5+M6), среда, парк, шов тарифа.
+        """Собрать мир по конфигу: три rng-потока (§3 плана M5+M6), среда, парк, шов тарифа.
 
-        ``seed=None`` → ``cfg.seed``; из ``np.random.SeedSequence(seed).spawn(2)``
-        создаются два дочерних генератора в фиксированном порядке
-        [эндогенный, экзогенный]: эндогенный передаётся ``spawn_requests``
-        (пуассоновский спавн, выбор назначения), экзогенный — ``WorldEnv``
-        (дождь, surge-инъекции); расход одного потока не сдвигает другой, что
-        обеспечивает сравнимость веток одного seed. Парк стартует без rng —
+        ``seed=None`` → ``cfg.seed``; из ``np.random.SeedSequence(seed).spawn(3)``
+        создаются три дочерних генератора в фиксированном порядке
+        [эндогенный, экзогенный, отказ пассажира]: эндогенный передаётся
+        ``spawn_requests`` (пуассоновский спавн, выбор назначения), экзогенный —
+        ``WorldEnv`` (дождь, surge-инъекции), третий разыгрывает отказ от долгой
+        подачи (change ``world-dispatch-radius``). Дети ``spawn(n)`` определяются
+        ``spawn_key=(i,)``, поэтому первые два ребёнка ``spawn(3)`` совпадают с
+        ``spawn(2)``: расход потока отказа не сдвигает спавн и среду, и ветки
+        одного seed остаются сравнимыми попарно. Парк стартует без rng —
         водитель ``i`` в зоне ``i mod Z`` (§10.14). Внутренние id заказов —
         счётчик с 1 в порядке создания (§10.11). ``price_fn`` — шов §10.13:
         подменяет числовой множитель тарифа зон, розыгрыши среды продолжаются.
@@ -129,9 +163,10 @@ class Engine:
 
         self._cfg = cfg
         self._seed = cfg.seed if seed is None else seed
-        endo_seq, exo_seq = np.random.SeedSequence(self._seed).spawn(2)
+        endo_seq, exo_seq, cancel_seq = np.random.SeedSequence(self._seed).spawn(3)
         self._rng = np.random.default_rng(endo_seq)  # эндогенный: спавн (шаг 2)
         self._rng_env = np.random.default_rng(exo_seq)  # экзогенный: среда (шаг 1)
+        self._rng_cancel = np.random.default_rng(cancel_seq)  # отказ пассажира (шаг 3)
         self._price_fn = price_fn
         self._city = build_city(cfg)
         self._env = WorldEnv(cfg, self._rng_env)
@@ -190,7 +225,13 @@ class Engine:
             self._iso_cache[moment] = cached
         return cached
 
-    def _nearest_free_id(self, origin: int) -> int | None:
+    def _nearest_free_id(
+        self,
+        origin: int,
+        *,
+        max_pickup_min: int | None = None,
+        travel_k: float = 1.0,
+    ) -> int | None:
         """Ближайший свободный водитель — семантика ``Fleet.nearest_free`` (§3.5).
 
         Резерв §5: полный проход парка O(D) на каждого ожидающего заменён
@@ -199,6 +240,11 @@ class Engine:
         при равенстве — меньший ``driver_id`` (списки зон отсортированы по
         возрастанию id, поэтому кандидат зоны — её первый элемент). Пропуск
         пустых зон эквивалентен пропуску занятых водителей в проходе парка.
+
+        ``max_pickup_min`` — радиус поиска (change ``world-dispatch-radius``):
+        если фактическая подача ближайшего водителя ``travel_minutes(path,
+        travel_k)`` длиннее предела, водителя нет. Подача монотонна по пути,
+        поэтому проверки ближайшего достаточно. Радиус rng не тратит.
         """
 
         best_id: int | None = None
@@ -212,6 +258,10 @@ class Engine:
                 best_time, best_id = candidate, ids[0]
             elif candidate == best_time:
                 best_id = min(best_id, ids[0])
+        if best_id is None or max_pickup_min is None:
+            return best_id
+        if travel_minutes(int(best_time), travel_k) > max_pickup_min:
+            return None
         return best_id
 
     def _trip_row(self, active: _ActiveTrip, status: str, dropoff_at: datetime | None) -> dict:
@@ -233,6 +283,71 @@ class Engine:
             "price_multiplier": active.trip.price_multiplier,
         }
 
+    def _apply_shifts(self, t: datetime) -> None:
+        """Шаг 1б цикла — сверка числа водителей на смене с целью минуты.
+
+        Change ``world-driver-shifts`` (спека simulator-loop): ``O`` — водители
+        на смене без метки ухода. При ``O > T(t)`` уходят свободные по
+        убыванию ``id`` сразу, затем остаток набирается метками ухода занятым
+        по убыванию ``id``. При ``O < T(t)`` сначала снимаются метки по
+        возрастанию ``id``, затем ``offline`` выходят на смену в домашней зоне
+        ``id mod Z`` и доступны диспатчу этой же минуты. Шаг детерминирован и
+        rng не тратит. Вызывается только в основной фазе при
+        ``drivers.shifts.enabled``.
+        """
+
+        count = self._cfg.drivers.count
+        zone_count = len(self._city.zones)
+        target = online_target(self._cfg.drivers, t)
+        online = count - self._fleet.offline_count() - self._fleet.leaving_count()
+        drivers = self._fleet._drivers
+        if online > target:
+            excess = online - target
+            # Свободные уходят первыми — по убыванию id, сразу.
+            for driver_id in range(count - 1, -1, -1):
+                if excess == 0:
+                    break
+                driver = drivers[driver_id]
+                if driver.state is not DriverState.FREE:
+                    continue
+                zone = driver.zone
+                self._fleet.go_offline(driver_id)
+                self._free_ids[zone].remove(driver_id)
+                excess -= 1
+            # Остаток — занятым без метки: уйдут по завершении работы.
+            for driver_id in range(count - 1, -1, -1):
+                if excess == 0:
+                    break
+                driver = drivers[driver_id]
+                if self._fleet.is_leaving(driver_id):
+                    continue
+                if driver.state in (
+                    DriverState.TO_PICKUP,
+                    DriverState.ON_TRIP,
+                    DriverState.RELOCATING,
+                ):
+                    self._fleet.mark_leaving(driver_id)
+                    excess -= 1
+        elif online < target:
+            need = target - online
+            # Сначала снимаем метки — водитель передумал уходить.
+            for driver_id in range(count):
+                if need == 0:
+                    break
+                if self._fleet.is_leaving(driver_id):
+                    self._fleet.unmark_leaving(driver_id)
+                    need -= 1
+            # Затем впускаем offline по возрастанию id в домашнюю зону id mod Z.
+            for driver_id in range(count):
+                if need == 0:
+                    break
+                if drivers[driver_id].state is not DriverState.OFFLINE:
+                    continue
+                zone = driver_id % zone_count
+                self._fleet.go_online(driver_id, zone)
+                insort(self._free_ids[zone], driver_id)
+                need -= 1
+
     def _apply_dropoffs(
         self,
         t: datetime,
@@ -252,13 +367,18 @@ class Engine:
         dropoff_pairs = self._fleet.tick()
         # Прибытия из переездов (change m6-supply-response): водитель свободен в
         # зоне цели — отдельный от высадок канал, возврат в зеркало (§5).
+        # Водитель с меткой ухода (change world-driver-shifts) стал offline —
+        # в зеркало не возвращается.
         for driver_id, dest_zone in self._fleet.arrivals():
-            insort(self._free_ids[dest_zone], driver_id)
+            if self._fleet._drivers[driver_id].state is DriverState.FREE:
+                insort(self._free_ids[dest_zone], driver_id)
         for driver_id, dest_zone in dropoff_pairs:
             active = in_flight.pop(driver_id)
             # Водитель освободился в зоне высадки — возврат в зеркало (§5):
             # вторая из двух точек смены состояния парка, см. __init__.
-            insort(self._free_ids[dest_zone], driver_id)
+            # Уходящий со смены не возвращается — заказ при этом completed.
+            if self._fleet._drivers[driver_id].state is DriverState.FREE:
+                insort(self._free_ids[dest_zone], driver_id)
             buffer.add_completion(dest_zone)
             trip_batch.append((active.internal_id, self._trip_row(active, _TERMINAL_COMPLETED, t)))
             landed.append(active)
@@ -366,6 +486,7 @@ class Engine:
 
         completed = 0
         unfulfilled = 0
+        cancelled = 0
         wait_sum = 0
         wait_count = 0
         deficit_rows = 0
@@ -389,6 +510,11 @@ class Engine:
                     self._env.event_label(zone, t),
                     float(price_mult_by_zone[zone.id]),
                 )
+            # Шаг 1б: смены водителей (change world-driver-shifts) — до спавна,
+            # чтобы вышедшие были доступны диспатчу этой же минуты, а ушедшие
+            # его не получили. При выключенных сменах шаг пропускается целиком.
+            if self._cfg.drivers.shifts.enabled:
+                self._apply_shifts(t)
             # Списки событий минуты — только при наблюдателе (design, решение 6):
             # при ``on_minute=None`` ни списки, ни записи не строятся.
             if on_minute is not None:
@@ -396,6 +522,7 @@ class Engine:
                 live_assignments: list[AssignEvent] = []
                 live_dropoffs: list[DropoffEvent] = []
                 live_expiries: list[ExpiryEvent] = []
+                live_cancellations: list[CancelEvent] = []
             # Шаг 2: спавн — λ уже содержит все множители мира (design, решение 2).
             for trip in spawn_requests(
                 self._rng,
@@ -430,9 +557,17 @@ class Engine:
                 waiting.sort(key=lambda active: (active.trip.created_at, active.internal_id))
                 still_waiting: list[_ActiveTrip] = []
                 travel_k = self._cfg.weather.travel_mult if is_rain else 1.0
+                dispatch = self._cfg.drivers.dispatch
                 for active in waiting:
                     origin = active.trip.origin
-                    driver_id = self._nearest_free_id(origin)
+                    # Радиус поиска (change world-dispatch-radius): водитель за
+                    # радиусом не назначается, заказ остаётся ждать следующей
+                    # минуты и обход очереди продолжается.
+                    driver_id = self._nearest_free_id(
+                        origin,
+                        max_pickup_min=dispatch.max_pickup_min,
+                        travel_k=travel_k,
+                    )
                     if driver_id is None:
                         still_waiting.append(active)
                         continue
@@ -440,6 +575,30 @@ class Engine:
                     pickup_min = travel_minutes(
                         int(self._city.path_min[driver_zone, origin]), travel_k
                     )
+                    # Отказ пассажира от долгой подачи (change world-dispatch-radius):
+                    # розыгрыш — отдельный третий поток rng, только при p > 0, ровно
+                    # одна равномерная величина на предложение в порядке обхода
+                    # очереди. При отказе заказ терминален, водитель остаётся в
+                    # зеркале, назначение/avg_wait/in_flight не трогаются.
+                    cancel_p = _cancel_prob(pickup_min, dispatch)
+                    if cancel_p > 0.0 and self._rng_cancel.random() < cancel_p:
+                        buffer.add_expiry(origin)
+                        trip_batch.append(
+                            (
+                                active.internal_id,
+                                self._trip_row(active, _TERMINAL_CANCELLED, None),
+                            )
+                        )
+                        cancelled += 1
+                        if on_minute is not None:
+                            live_cancellations.append(
+                                CancelEvent(
+                                    internal_id=active.internal_id,
+                                    origin=origin,
+                                    pickup_min=pickup_min,
+                                )
+                            )
+                        continue
                     trip_min = travel_minutes(
                         int(self._city.path_min[origin, active.trip.dest]), travel_k
                     )
@@ -543,6 +702,8 @@ class Engine:
                         assignments=tuple(live_assignments),
                         dropoffs=tuple(live_dropoffs),
                         expiries=tuple(live_expiries),
+                        cancellations=tuple(live_cancellations),
+                        online_drivers=self._cfg.drivers.count - self._fleet.offline_count(),
                     )
                 )
             # Батчи раз в сим-час — после шага 6 (§5, design решение 5);
@@ -589,12 +750,13 @@ class Engine:
                             ExpiryEvent(internal_id=active.internal_id, origin=active.trip.origin)
                             for active in expired
                         ),
+                        online_drivers=self._cfg.drivers.count - self._fleet.offline_count(),
                     )
                 )
         # Финальная выгрузка: строки trips, терминальные в хвосте, не теряются.
         trips_written += self._flush_batch(trip_batch, metric_batch, writer)
 
-        trips_total = completed + unfulfilled
+        trips_total = completed + unfulfilled + cancelled
         return Summary(
             days=days,
             seed=self._seed,
@@ -602,6 +764,8 @@ class Engine:
             completed=completed,
             unfulfilled=unfulfilled,
             unfulfilled_share=100.0 * unfulfilled / trips_total if trips_total else 0.0,
+            cancelled=cancelled,
+            cancelled_share=100.0 * cancelled / trips_total if trips_total else 0.0,
             avg_wait_min=wait_sum / wait_count if wait_count else 0.0,
             deficit_share=100.0 * deficit_rows / metric_rows if metric_rows else 0.0,
             wall_sec=time.perf_counter() - start_wall,

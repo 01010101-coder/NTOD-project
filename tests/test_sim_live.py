@@ -29,6 +29,7 @@ from simulator.__main__ import SqliteTripWriter
 from simulator.engine import Engine
 from simulator.live import (
     AssignEvent,
+    CancelEvent,
     DropoffEvent,
     ExpiryEvent,
     MinuteRecord,
@@ -137,6 +138,77 @@ def test_live_types_frozen():
     ):
         with pytest.raises(dataclasses.FrozenInstanceError):
             setattr(obj, field, value)
+
+
+def test_cancel_event_frozen_and_default():
+    """``CancelEvent`` неизменяем; ``cancellations`` по умолчанию пуст (5.1)."""
+
+    t0 = from_iso("2026-11-02 00:00:00")
+    cancel = CancelEvent(internal_id=2, origin=0, pickup_min=13)
+    record = MinuteRecord(
+        t=t0,
+        is_rain=False,
+        price_mult=(1.0, 1.0),
+        free_by_zone=(1, 0),
+        spawns=(),
+        assignments=(),
+        dropoffs=(),
+        expiries=(),
+    )
+    assert record.cancellations == ()
+    assert cancel.pickup_min == 13
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(cancel, "origin", 1)
+
+
+def test_cancellation_events_match_trips():
+    """Цепочка spawn → cancellation для каждой строки ``cancelled`` (5.1).
+
+    Мир: единственный водитель в зоне 0, заказы только в зоне 0 (подача 1 мин >
+    терпения 0), вероятность отказа 1.0 — каждый заказ отменяется, водитель
+    остаётся свободным. События сверяются с ``Summary`` и таблицей ``trips``.
+    """
+
+    cfg = micro_config(
+        city={
+            "zones": [MICRO_ZONES[0], {**MICRO_ZONES[1], "attract_origin": 0.0}],
+            "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 5.0}],
+        },
+        population={"scale": 50.0},
+        drivers={
+            "count": 1,
+            "wait_limit_min": 6,
+            "dispatch": {
+                "cancel_grace_min": 0,
+                "cancel_prob_per_min": 1.0,
+                "cancel_max_prob": 1.0,
+            },
+        },
+    )
+    summary, records, conn = run_with_records(cfg, 30 / 1440)
+
+    spawns = {event.internal_id: event for record in records for event in record.spawns}
+    cancellations = [event for record in records for event in record.cancellations]
+    assert len(cancellations) == summary.cancelled > 0
+    assert len(spawns) == summary.trips_total
+    assert summary.completed == 0 and summary.unfulfilled == 0
+    for event in cancellations:
+        assert event.internal_id in spawns
+        assert event.origin == spawns[event.internal_id].origin
+        assert event.pickup_min >= 1
+
+    # Отказ не назначает: событий назначения у отменённых заказов нет.
+    assigned = {event.internal_id for record in records for event in record.assignments}
+    assert assigned == set()
+
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM trips WHERE status = 'cancelled'"
+        " AND assigned_at IS NULL AND pickup_at IS NULL AND dropoff_at IS NULL"
+    ).fetchone()[0]
+    assert rows == summary.cancelled
+
+    # Отказ не меняет число свободных водителей: каждая запись — полный парк.
+    assert all(sum(record.free_by_zone) == cfg.drivers.count for record in records)
 
 
 def test_first_record_matches_world_start():
@@ -365,3 +437,44 @@ def test_minute_rhythm():
         assert add_minutes(prev.t, 1) == following.t
     for record in records[1440:]:
         assert record.spawns == () and record.assignments == ()
+
+
+# --- Смены водителей в записи минуты (change world-driver-shifts, задача 5.1) ---
+
+
+def test_online_drivers_equals_fleet_without_shifts():
+    """Сценарий «Без смен на смене весь парк»: ``online_drivers == count`` в каждой записи."""
+
+    cfg = micro_config(population={"scale": 50.0}, drivers={"count": 3, "wait_limit_min": 6})
+    _summary, records, _conn = run_with_records(cfg, 1)
+    assert records
+    assert all(record.online_drivers == cfg.drivers.count for record in records)
+
+
+def test_online_drivers_consistent_with_free_park():
+    """Сценарий «Свободный парк согласован с числом на смене» (без отклика)."""
+
+    cfg = micro_config(
+        population={"scale": 50.0},
+        drivers={"count": 10, "wait_limit_min": 6, "shifts": {"enabled": True}},
+    )
+    _summary, records, _conn = run_with_records(cfg, 1)
+    assert records
+    active: set[int] = set()
+    for record in records:
+        active.update(assignment.internal_id for assignment in record.assignments)
+        active.difference_update(dropoff.internal_id for dropoff in record.dropoffs)
+        assert sum(record.free_by_zone) == record.online_drivers - len(active)
+
+
+def test_online_drivers_follow_profile():
+    """Сценарий «Число на смене меняется по профилю»: 03:00 меньше 18:00."""
+
+    cfg = micro_config(
+        drivers={"count": 20, "wait_limit_min": 6, "shifts": {"enabled": True}},
+    )
+    _summary, records, _conn = run_with_records(cfg, 1)
+    by_hour = {
+        record.t.hour: record for record in records if record.t.date() == SIM_START_DT.date()
+    }
+    assert by_hour[3].online_drivers < by_hour[18].online_drivers

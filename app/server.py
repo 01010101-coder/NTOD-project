@@ -350,6 +350,7 @@ def record_to_dict(record: MinuteRecord) -> dict:
         "is_rain": record.is_rain,
         "price_mult": list(record.price_mult),
         "free_by_zone": list(record.free_by_zone),
+        "online_drivers": record.online_drivers,
         "spawns": [
             {
                 "internal_id": event.internal_id,
@@ -381,6 +382,14 @@ def record_to_dict(record: MinuteRecord) -> dict:
         ],
         "expiries": [
             {"internal_id": event.internal_id, "origin": event.origin} for event in record.expiries
+        ],
+        "cancellations": [
+            {
+                "internal_id": event.internal_id,
+                "origin": event.origin,
+                "pickup_min": event.pickup_min,
+            }
+            for event in record.cancellations
         ],
     }
 

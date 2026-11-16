@@ -116,6 +116,41 @@ def test_cli_summary_progress_and_flags(tmp_path):
     assert len(progress) >= 1
 
 
+def test_cli_summary_cancel_line(tmp_path):
+    """С включёнными отказами stdout — 5 строк: ``cancel:`` перед ``wall:`` (4.2)."""
+
+    config_path = tmp_path / "cancel.yaml"
+    db = tmp_path / "cancel.db"
+    config_path.write_text(
+        "seed: 42\n"
+        f"storage:\n  db_path: {db}\n"
+        "drivers:\n"
+        "  dispatch:\n"
+        "    cancel_grace_min: 0\n"
+        "    cancel_prob_per_min: 0.5\n",
+        encoding="utf-8",
+    )
+    result = run_cli(["--days", "1", "--config", str(config_path)])
+    assert result.returncode == 0, result.stderr
+
+    lines = result.stdout.rstrip("\n").split("\n")
+    assert len(lines) == 5
+    cancel_match = re.fullmatch(r"cancel: cancelled=(\d+) cancelled_share=(\d+\.\d)%", lines[3])
+    assert cancel_match, lines[3]
+    assert int(cancel_match.group(1)) > 0, "сценарий без отказов не проверен"
+    assert re.fullmatch(r"wall: \d+\.\ds", lines[4])
+
+    # total второй строки включает отказы.
+    total_match = re.fullmatch(
+        r"trips: total=(\d+) completed=(\d+) completed_share=\d+\.\d% "
+        r"unfulfilled=(\d+) unfulfilled_share=\d+\.\d%",
+        lines[1],
+    )
+    assert total_match, lines[1]
+    total, completed, unfulfilled = map(int, total_match.groups())
+    assert total == completed + unfulfilled + int(cancel_match.group(1))
+
+
 def test_cli_defaults_from_config(tmp_path):
     """Дефолты --seed/--db берутся из конфига, если флаги не заданы (спека §4)."""
 

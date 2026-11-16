@@ -186,7 +186,8 @@ def generate_branch(
     в stderr и возврат ``None`` (CLI переводит в exit 2); неизвестное имя —
     ``ValueError`` с именем ветки в сообщении, прогон не начинается. Успех —
     ``Summary``; прогресс раз в сим-час и сводка формата §4 печатаются теми
-    же функциями ``simulator.writers``, что и у CLI ``simulator``; после
+    же функциями ``simulator.writers``, что и у CLI ``simulator`` (при
+    включённых отказах пассажиров — с пятой строкой ``cancel:``); после
     контурной ветки печатается диагностика срабатываний ``policy_fire_rate``
     (наблюдаемая база сверки честности C/D, спека m6-worlds).
     """
@@ -242,7 +243,11 @@ def generate_branch(
             shadow_caster.on_metrics_row if shadow_caster is not None else None,
         ),
     )
-    print_summary(summary, str(db))
+    print_summary(
+        summary,
+        str(db),
+        cancel_enabled=cfg.drivers.dispatch.cancel_prob_per_min > 0.0,
+    )
     if contour is not None:
         print(
             f"branch: name={name} policy_fire_rate={contour.fire_rate:.3f}"
