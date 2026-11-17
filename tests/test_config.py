@@ -514,7 +514,6 @@ def test_online_share_defaults_are_independent_lists() -> None:
     assert second.weekday[0] == DEFAULT_WEEKDAY_SHARE[0]
 
 
-<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # ml.planning — секция прогноза планирования (change ml-planning-forecast)
 # ---------------------------------------------------------------------------
