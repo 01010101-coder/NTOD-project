@@ -25,6 +25,7 @@ from common.config import (
     PolicyStairCfg,
     RepositionCfg,
     ShiftsCfg,
+    ShocksCfg,
     StorageCfg,
     load_config,
 )
@@ -485,3 +486,70 @@ def test_online_share_defaults_are_independent_lists() -> None:
     first, second = OnlineShareCfg(), OnlineShareCfg()
     first.weekday[0] = 1.0
     assert second.weekday[0] == DEFAULT_WEEKDAY_SHARE[0]
+
+
+# --- Подсекция шоков спроса demand.shocks (change world-demand-shocks) ---
+
+
+def test_shocks_defaults_without_subsection(tmp_path: Path) -> None:
+    """Сценарий «Старый конфиг без подсекции»: шоки выключены, поля — дефолты."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("demand: {base_rate: 2.0}\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.demand.shocks == ShocksCfg()
+    assert cfg.demand.shocks.enabled is False
+    assert cfg.demand.shocks.city_sigma == 0.12
+    assert cfg.demand.shocks.city_tau_min == 240
+    assert cfg.demand.shocks.zone_sigma == 0.10
+    assert cfg.demand.shocks.zone_tau_min == 120
+    assert cfg.demand.shocks.day_sigma == 0.08
+
+
+def test_shocks_partial_subsection(tmp_path: Path) -> None:
+    """Сценарий «Частичная подсекция»: заданные поля из файла, остальные — дефолты."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "demand:\n  shocks:\n    enabled: true\n    city_sigma: 0.2\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.demand.shocks.enabled is True
+    assert cfg.demand.shocks.city_sigma == 0.2
+    assert cfg.demand.shocks.city_tau_min == 240
+    assert cfg.demand.shocks.zone_sigma == 0.10
+    assert cfg.demand.shocks.zone_tau_min == 120
+    assert cfg.demand.shocks.day_sigma == 0.08
+
+
+def test_shocks_reference_config_equals_defaults() -> None:
+    """Эталонный ``config.yaml`` содержит подсекцию, равную дефолтам (задача 1.2)."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    assert cfg.demand.shocks == ShocksCfg()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"city_tau_min": 0},
+        {"zone_tau_min": 0},
+        {"zone_sigma": -0.1},
+        {"city_sigma": -0.1},
+        {"day_sigma": -0.1},
+    ],
+)
+def test_shocks_invalid_values_rejected(payload: dict) -> None:
+    """Сценарий «Недопустимое значение отклоняется»: путь до поля в ошибке."""
+
+    key = next(iter(payload))
+    with pytest.raises(ValidationError, match=rf"demand\.shocks\.{key}"):
+        AppConfig.model_validate({"demand": {"shocks": payload}})
+
+
+def test_shocks_unknown_key_rejected() -> None:
+    """Сценарий «Неизвестный ключ отклоняется»: путь ``demand.shocks.holiday_mult``."""
+
+    with pytest.raises(ValidationError, match=r"demand\.shocks\.holiday_mult"):
+        AppConfig.model_validate({"demand": {"shocks": {"holiday_mult": 1.5}}})

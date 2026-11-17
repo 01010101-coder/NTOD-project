@@ -6,9 +6,9 @@
 с детерминированным порядком разыгрываний и выбором назначения
 ``P(B | A) ∝ attract_dest(B) × exp(−path_min[A][B] / dest_decay_min)``, B ≠ A).
 Модуль также несёт семантику лимита ожидания §3.4, порождающую статус
-``unfulfilled``. Среда (дождь, событие, тариф) входит готовыми параметрами
-``is_rain`` / ``event_mult`` / ``price_mult`` — случайные события модуль сам
-не разыгрывает (design.md, Non-Goals).
+``unfulfilled``. Среда (дождь, событие, тариф, шок спроса) входит готовыми
+параметрами ``is_rain`` / ``event_mult`` / ``price_mult`` / ``shock_mult`` —
+случайные события модуль сам не разыгрывает (design.md, Non-Goals).
 """
 
 from dataclasses import dataclass
@@ -65,19 +65,22 @@ def lambda_rate(
     event_mult: float,
     price_mult: float,
     cfg: AppConfig,
+    shock_mult: float = 1.0,
 ) -> float:
     """Интенсивность спроса заказа/мин для зоны в момент ``t`` (§3.3 плана M2).
 
     Мультипликативная формула дословно: ``base_rate × профиль_часа(архетип,
     час, будни/выходные) × attract_origin × population.scale × (дождь? ×
-    weather.demand_mult) × event_mult × price_mult**(−elasticity_alpha)``.
+    weather.demand_mult) × event_mult × shock_mult × price_mult**(−elasticity_alpha)``.
     Источники множителей — design.md, решение 1: профиль из
     ``city.profiles[zone.archetype]`` по часу ``t.hour`` и строке по дню недели
     (``t.weekday() < 5`` — будни, иначе выходные); дождь только при
     ``is_rain=True``; ``event_mult`` применяется к зоне только при активном
     для её архетипа «пятничном вечере» (решение 3 design.md); эластичность —
     множитель ``m**(−α)`` внутри λ (решение §10.7 плана M2), а не отдельной
-    фильтрацией пассажиров.
+    фильтрацией пассажиров. ``shock_mult`` — скрытый множитель шока спроса
+    зоны от среды (change ``world-demand-shocks``); дефолт 1.0, поэтому
+    произведение с ним побитово не меняет прежнюю λ.
     """
     profile = city.profiles[zone.archetype]
     hours = profile.weekday if t.weekday() < 5 else profile.weekend
@@ -89,6 +92,7 @@ def lambda_rate(
         rate *= cfg.weather.demand_mult
     if _friday_evening_active(zone.archetype, t, cfg):
         rate *= event_mult
+    rate *= shock_mult
     return rate * price_mult ** (-cfg.pricing.elasticity_alpha)
 
 
@@ -101,6 +105,7 @@ def spawn_requests(
     event_mult: float,
     price_mult_by_zone: np.ndarray,
     cfg: AppConfig,
+    shock_mult_by_zone: np.ndarray | None = None,
 ) -> list[TripRequest]:
     """Пуассоновский спавн заказов за минуту ``t`` (§3.3 плана M2).
 
@@ -112,9 +117,14 @@ def spawn_requests(
     разыгрываний: пуассон зоны, затем для каждого пассажира по порядку — один
     розыгрыш назначения и немедленное создание заказа (design.md, решение 2).
     Одинаковый seed и параметры дают идентичный список заказов.
+
+    ``shock_mult_by_zone`` — массив скрытых множителей шока по зонам (change
+    ``world-demand-shocks``) рядом с ``price_mult_by_zone``; ``None`` — все
+    множители 1.0, прежнее поведение побитово.
     """
     requests: list[TripRequest] = []
     for zone in city.zones:
+        shock_mult = 1.0 if shock_mult_by_zone is None else float(shock_mult_by_zone[zone.id])
         rate = lambda_rate(
             city,
             zone,
@@ -123,6 +133,7 @@ def spawn_requests(
             event_mult=event_mult,
             price_mult=float(price_mult_by_zone[zone.id]),
             cfg=cfg,
+            shock_mult=shock_mult,
         )
         count = int(rng.poisson(rate))
         for _ in range(count):

@@ -5,18 +5,20 @@
 фиксированным порядком шагов (часть контракта детерминизма, §10.1), агрегирует
 город через ``simulator.aggregate.AggregateBuffer`` и отдаёт строки таблиц
 интерфейсу ``TripWriter`` — движок не знает про SQLite (§10.12). Вся случайность
-мира идёт через ТРИ дочерних ``numpy.random.Generator``, высаженных из
-``np.random.SeedSequence(seed).spawn(3)`` в фиксированном порядке
-[эндогенный, экзогенный, отказ пассажира] (§3 плана M5+M6,
+мира идёт через ЧЕТЫРЕ дочерних ``numpy.random.Generator``, высаженных из
+``np.random.SeedSequence(seed).spawn(4)`` в фиксированном порядке
+[эндогенный, экзогенный, отказ пассажира, шоки спроса] (§3 плана M5+M6,
 ``docs/plan-m5-m6-policy.md``): эндогенный потребляют пуассоновский спавн и
 выбор назначения, экзогенный — суточные розыгрыши среды ``WorldEnv`` (дождь,
 surge-инъекции), третий — отказ пассажира от долгой подачи (change
-``world-dispatch-radius``); расход одного потока не сдвигает остальные, поэтому
+``world-dispatch-radius``), четвёртый — поминутные шаги шоков спроса (change
+``world-demand-shocks``); расход одного потока не сдвигает остальные, поэтому
 ветки одного seed с разными политиками цены сравнимы попарно. Wall-clock читается
 только по периметру ``run`` — для ``progress.elapsed_sec`` и ``Summary.wall_sec``
 (§5). Шов ``price_fn`` (§10.13) подменяет числовой тариф зон, не трогая
-розыгрыши среды: ``env.advance_day`` вызывается безусловно, экзогенный поток
-не сдвигается, ветки A/B на одном seed сравнимы попарно.
+розыгрыши среды: ``env.advance_day`` и шаг шоков вызываются безусловно,
+экзогенный и шоковый потоки не сдвигаются, ветки A/B на одном seed сравнимы
+попарно.
 """
 
 import time
@@ -145,31 +147,34 @@ class Engine:
         seed: int | None = None,
         price_fn: Callable[[int, datetime], float] | None = None,
     ) -> None:
-        """Собрать мир по конфигу: три rng-потока (§3 плана M5+M6), среда, парк, шов тарифа.
+        """Собрать мир по конфигу: четыре rng-потока (§3 плана M5+M6), среда, парк, шов тарифа.
 
-        ``seed=None`` → ``cfg.seed``; из ``np.random.SeedSequence(seed).spawn(3)``
-        создаются три дочерних генератора в фиксированном порядке
-        [эндогенный, экзогенный, отказ пассажира]: эндогенный передаётся
-        ``spawn_requests`` (пуассоновский спавн, выбор назначения), экзогенный —
-        ``WorldEnv`` (дождь, surge-инъекции), третий разыгрывает отказ от долгой
-        подачи (change ``world-dispatch-radius``). Дети ``spawn(n)`` определяются
-        ``spawn_key=(i,)``, поэтому первые два ребёнка ``spawn(3)`` совпадают с
-        ``spawn(2)``: расход потока отказа не сдвигает спавн и среду, и ветки
-        одного seed остаются сравнимыми попарно. Парк стартует без rng —
-        водитель ``i`` в зоне ``i mod Z`` (§10.14). Внутренние id заказов —
-        счётчик с 1 в порядке создания (§10.11). ``price_fn`` — шов §10.13:
-        подменяет числовой множитель тарифа зон, розыгрыши среды продолжаются.
+        ``seed=None`` → ``cfg.seed``; из ``np.random.SeedSequence(seed).spawn(4)``
+        создаются четыре дочерних генератора в фиксированном порядке
+        [эндогенный, экзогенный, отказ пассажира, шоки спроса]: эндогенный
+        передаётся ``spawn_requests`` (пуассоновский спавн, выбор назначения),
+        экзогенный — ``WorldEnv`` (дождь, surge-инъекции), третий разыгрывает
+        отказ от долгой подачи (change ``world-dispatch-radius``), четвёртый —
+        поминутные шаги шоков спроса (change ``world-demand-shocks``). Дети
+        ``spawn(n)`` определяются ``spawn_key=(i,)``, поэтому первые три ребёнка
+        ``spawn(4)`` совпадают с ``spawn(3)``: включение шоков не сдвигает
+        дождь, инъекции, спавн и отказы, и ветки одного seed остаются
+        сравнимыми попарно. Парк стартует без rng — водитель ``i`` в зоне
+        ``i mod Z`` (§10.14). Внутренние id заказов — счётчик с 1 в порядке
+        создания (§10.11). ``price_fn`` — шов §10.13: подменяет числовой
+        множитель тарифа зон, розыгрыши среды и шоков продолжаются.
         """
 
         self._cfg = cfg
         self._seed = cfg.seed if seed is None else seed
-        endo_seq, exo_seq, cancel_seq = np.random.SeedSequence(self._seed).spawn(3)
+        endo_seq, exo_seq, cancel_seq, shock_seq = np.random.SeedSequence(self._seed).spawn(4)
         self._rng = np.random.default_rng(endo_seq)  # эндогенный: спавн (шаг 2)
         self._rng_env = np.random.default_rng(exo_seq)  # экзогенный: среда (шаг 1)
         self._rng_cancel = np.random.default_rng(cancel_seq)  # отказ пассажира (шаг 3)
+        self._rng_shock = np.random.default_rng(shock_seq)  # шоки спроса (шаг 1)
         self._price_fn = price_fn
         self._city = build_city(cfg)
-        self._env = WorldEnv(cfg, self._rng_env)
+        self._env = WorldEnv(cfg, self._rng_env, self._rng_shock)
         self._fleet = Fleet(cfg.drivers.count, len(self._city.zones))
         self._next_trip_id = 1  # внутренние id заказов: счётчик с 1 (§10.11)
         # Зеркало свободных водителей (резерв §5 — производительность): списки
@@ -498,6 +503,17 @@ class Engine:
             # Шаг 1: среда — на 00:00 суток розыгрыш эпизодов на сутки (§3.6).
             if k % 1440 == 0:
                 self._env.advance_day(k // 1440)
+            # Шаг шоков спроса (change world-demand-shocks): при включённых
+            # шоках — поминутный шаг среды и множители зон этой минуты. Шаг
+            # безусловен и не зависит от тарифа и политики; при выключенных
+            # шоках он пропускается, а спавн получает None (множитель 1.0).
+            shock_mult_by_zone: np.ndarray | None = None
+            if self._cfg.demand.shocks.enabled:
+                self._env.advance_minute(t)
+                shock_mult_by_zone = np.array(
+                    [self._env.demand_factor(zone.id, t) for zone in self._city.zones],
+                    dtype=float,
+                )
             # Шаг 1а: поминутное накопление среды каждой зоны (design, решение 3).
             is_rain = self._env.is_rain(t)
             price_mult_by_zone = np.array(
@@ -532,6 +548,7 @@ class Engine:
                 event_mult=event_mult,
                 price_mult_by_zone=price_mult_by_zone,
                 cfg=self._cfg,
+                shock_mult_by_zone=shock_mult_by_zone,
             ):
                 internal_id = self._next_trip_id
                 self._next_trip_id += 1
