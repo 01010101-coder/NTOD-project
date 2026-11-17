@@ -205,6 +205,18 @@ def test_prepare_pos_weight(pattern_db: Path) -> None:
     assert data.pos_weight == pytest.approx((1.0 - share) / share)
 
 
+def test_prepare_pos_weight_harm_rule(noise_db: Path) -> None:
+    """При ``deficit_label: harm`` метки и pos_weight считаются по вреду:
+    окна не меняются, метки отличаются, вес = негативы/позитивы harm train-роли."""
+    legacy = _prepare(noise_db)
+    harm = _prepare(noise_db, deficit_label="harm")
+    assert np.array_equal(harm.windows["train"], legacy.windows["train"])
+    assert not np.array_equal(harm.deficit["train"], legacy.deficit["train"])
+    share = float(harm.deficit["train"].mean())
+    assert 0.0 < share < 1.0
+    assert harm.pos_weight == pytest.approx((1.0 - share) / share)
+
+
 def test_prepare_empty_role_raises(pattern_db: Path) -> None:
     """Пустая роль val (val_days=0) и пустая роль train (train_days=0) —
     ValueError с именем роли до построения сети."""
@@ -325,6 +337,32 @@ def test_save_artifacts_and_roundtrip(pattern_db: Path, tmp_path: Path) -> None:
     assert metrics["best_val"]["total"] == min(entry["val"]["total"] for entry in history)
     assert metrics["ml_cfg"] == blob["ml_cfg"]
     assert metrics["wall_sec"] >= 0.0
+
+
+def test_artifacts_record_harm_label(pattern_db: Path, tmp_path: Path) -> None:
+    """Сеть, обученная при ``harm``: снимок и metrics.json фиксируют правило,
+    pos_weight посчитан по меткам harm train-роли (сценарий «Правило метки в артефакте»)."""
+    ml_cfg = _ml_cfg(max_epochs=2, deficit_label="harm")
+    data = _prepare(pattern_db, deficit_label="harm")
+    result = train_model("mlp", data, ml_cfg)
+    version = model_version_for("mlp", today=date(2026, 11, 7))
+    model_dir = tmp_path / "artifacts" / version
+    save_model_artifacts(
+        model_dir,
+        model_version=version,
+        arch="mlp",
+        model=result.model,
+        data=data,
+        result=result,
+        ml_cfg=ml_cfg,
+    )
+
+    blob = torch.load(model_dir / WEIGHTS_FILE, weights_only=True)
+    assert blob["ml_cfg"]["deficit_label"] == "harm"
+    metrics = json.loads((model_dir / METRICS_FILE).read_text(encoding="utf-8"))
+    assert metrics["deficit_label"] == "harm"
+    share = float(data.deficit["train"].mean())
+    assert metrics["pos_weight"] == pytest.approx((1.0 - share) / share)
 
 
 def test_save_artifacts_refuses_existing_dir(pattern_db: Path, tmp_path: Path) -> None:

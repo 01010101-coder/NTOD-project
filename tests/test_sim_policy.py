@@ -184,6 +184,16 @@ def test_reactive_calm_zone() -> None:
     assert reactive_multiplier(_row(requests=2, free_drivers=5), 1.30) == 1.00
 
 
+def test_reactive_rule_independent_of_ml_label() -> None:
+    """Спека «Правило не зависит от метки моделей»: при ``ml.deficit_label:
+    harm`` строка (free 1, requests 10, unfulfilled 0) всё равно даёт
+    ``reactive_mult`` — реактивная политика закреплена за правилом контракта."""
+    cfg = AppConfig.model_validate({"ml": {"deficit_label": "harm"}})
+    row = _row(requests=10, free_drivers=1, unfulfilled=0)
+    assert cfg.ml.deficit_label == "harm"
+    assert reactive_multiplier(row, cfg.policy.reactive_mult) == cfg.policy.reactive_mult
+
+
 def test_reactive_warmup_no_rows() -> None:
     """Нет закрытых бакетов (прогрев мира) — правило не срабатывает: множитель 1.00."""
 

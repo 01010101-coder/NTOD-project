@@ -44,7 +44,7 @@ from app.paths import build_routes
 from app.replay import FillRun, ReplayLog, snapshot_at, start_fill
 from common.config import AppConfig
 from common.timeutil import from_iso, to_iso
-from ml.dataset import deficit_label
+from ml.dataset import DeficitRule, deficit_label
 from simulator.branches import BRANCHES, list_worlds
 from simulator.live import MinuteRecord
 from storage.schema import TABLE_FORECASTS, TABLE_ZONE_METRICS
@@ -128,15 +128,18 @@ def _epoch_forecast_rows(
     horizon: int | None = None,
     start: datetime | None = None,
     stop: datetime | None = None,
+    label_rule: DeficitRule = "legacy",
 ) -> list[dict]:
     """Строки ``forecasts``, дополненные фактом бакета ``ts + horizon_min``.
 
     Соединение — LEFT JOIN по ``zone_id`` и ``datetime(ts, '+H minutes')``
     (формат времени БД совпадает с выводом ``datetime()``), порядок — по
     ``ts`` с детерминирующими вторичными ключами. Пропущенный факт-бакет
-    (хвост эпохи) даёт ``null``-поля факта. Ошибка чтения (нет таблицы,
-    чужая схема) — пустой список, не исключение: требование устойчивости
-    к отсутствию ML-данных.
+    (хвост эпохи) даёт ``null``-поля факта. ``actual_deficit`` — правило метки
+    ``label_rule`` (``ml.deficit_label`` конфигурации сервера; change
+    ``ml-harm-deficit-label``). Ошибка чтения (нет таблицы, чужая схема) —
+    пустой список, не исключение: требование устойчивости к отсутствию
+    ML-данных.
     """
 
     conn = _connect_epoch(db_path)
@@ -189,13 +192,16 @@ def _epoch_forecast_rows(
                 "actual_deficit": None,
             }
         else:
-            # Правило дефицита контракта — единственная реализация
-            # (:func:`ml.dataset.deficit_label`), копия в сервере не плодится.
+            # Правило метки — единственная реализация
+            # (:func:`ml.dataset.deficit_label`), копия в сервере не плодится;
+            # правило выбирает ключ ``ml.deficit_label`` конфига сервера.
             requests, free = row["actual_requests"], row["actual_free_drivers"]
             actual = {
                 "actual_requests": float(requests),
                 "actual_free_drivers": float(free),
-                "actual_deficit": bool(deficit_label(requests, free, row["actual_unfulfilled"])),
+                "actual_deficit": bool(
+                    deficit_label(requests, free, row["actual_unfulfilled"], rule=label_rule)
+                ),
             }
         result.append(
             {
@@ -829,7 +835,13 @@ def create_app(
         start = from_iso(frm) if frm is not None else None
         stop = from_iso(to) if to is not None else None
         rows = _epoch_forecast_rows(
-            cfg.ml.db, zone=zone, model=model, horizon=horizon, start=start, stop=stop
+            cfg.ml.db,
+            zone=zone,
+            model=model,
+            horizon=horizon,
+            start=start,
+            stop=stop,
+            label_rule=cfg.ml.deficit_label,
         )
         return {"forecasts": rows}
 
@@ -852,7 +864,13 @@ def create_app(
             )
         rows = [
             row
-            for row in _epoch_forecast_rows(cfg.ml.db, zone=zone, model=model, horizon=horizon)
+            for row in _epoch_forecast_rows(
+                cfg.ml.db,
+                zone=zone,
+                model=model,
+                horizon=horizon,
+                label_rule=cfg.ml.deficit_label,
+            )
             if row["actual_requests"] is not None
         ]
         residuals = [

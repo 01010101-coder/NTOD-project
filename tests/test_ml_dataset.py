@@ -476,6 +476,36 @@ def test_deficit_label_boundaries() -> None:
     assert deficit_label(requests=10, free_drivers=10, unfulfilled=1) is True
 
 
+def test_deficit_label_harm_rule() -> None:
+    """Правило ``harm``: только ``unfulfilled > 0``; опечатка правила — ValueError.
+
+    Сценарии спеки «Соотношение без потерь» (10, 3, 0: legacy — дефицит,
+    harm — нет) и «Потери при достатке машин» (4, 6, 1: оба правила — дефицит);
+    вызов без ``rule`` и с ``rule="legacy"`` совпадает поэлементно.
+    """
+    assert deficit_label(10, 3, 0, rule="legacy") is True
+    assert deficit_label(10, 3, 0, rule="harm") is False
+    assert deficit_label(4, 6, 1, rule="legacy") is True
+    assert deficit_label(4, 6, 1, rule="harm") is True
+    with pytest.raises(ValueError, match="loss"):
+        deficit_label(10, 3, 0, rule="loss")  # type: ignore[arg-type]
+    for args in ((10, 3, 0), (0, 0, 0), (4, 6, 1), (10, 10, 0)):
+        assert deficit_label(*args) == deficit_label(*args, rule="legacy")
+
+
+def test_targets_harm_rule_ignores_ratio(targets_db: Path) -> None:
+    """Метка harm игнорирует соотношение: ts+15 (1/10, без потерь) → 0,
+    ts+30 (unfulfilled 2) → 1; requests и free_drivers те же, что при legacy."""
+    source = SqliteRowSource(targets_db)
+    legacy = build_targets(source, Z0, NOON)
+    harm = build_targets(source, Z0, NOON, label_rule="harm")
+    assert legacy is not None and harm is not None
+    assert legacy.deficit == (True, True)
+    assert harm.deficit == (False, True)
+    assert harm.requests == legacy.requests == (10.0, 4.0)
+    assert harm.free_drivers == legacy.free_drivers == (3.0, 10.0)
+
+
 def test_targets_missing_horizon(targets_db: Path) -> None:
     """Бакет ts+30 за краем эпохи — таргет не выдаётся."""
     conn = connect(str(targets_db))
@@ -572,6 +602,36 @@ def test_collect_examples_splits(days_db: Path) -> None:
     # Метки дефицита — 0/1.
     assert set(np.unique(train.deficit)) <= {0.0, 1.0}
     assert train.requests.shape == (277, 2)
+
+
+def test_collect_examples_label_rule_only_changes_deficit(days_db: Path) -> None:
+    """Правило метки меняет только ``deficit``: окна, requests, free_drivers и
+    ключи при ``harm`` и ``legacy`` совпадают поэлементно; метка harm — ровно
+    ``unfulfilled > 0`` целевого бакета и является подмножеством legacy."""
+    legacy = _collect(days_db)
+    harm = collect_examples(
+        SqliteRowSource(days_db),
+        zones=[Z0],
+        start=SIM_START,
+        train_days=2,
+        val_days=1,
+        test_days=1,
+        window_hours=1,
+        label_rule="harm",
+    )
+    source = SqliteRowSource(days_db)
+    for role in ("train", "val", "test"):
+        assert harm[role].keys == legacy[role].keys
+        assert np.array_equal(harm[role].windows, legacy[role].windows)
+        assert np.array_equal(harm[role].requests, legacy[role].requests)
+        assert np.array_equal(harm[role].free_drivers, legacy[role].free_drivers)
+        assert np.all(harm[role].deficit <= legacy[role].deficit)
+    assert not np.array_equal(harm["train"].deficit, legacy["train"].deficit)
+    for k, (zone_id, ts) in enumerate(harm["train"].keys[:5]):
+        for h_idx, horizon in enumerate((15, 30)):
+            point = source.metrics_at(zone_id, add_minutes(ts, horizon))
+            assert point is not None
+            assert harm["train"].deficit[k, h_idx] == float(point.unfulfilled > 0)
 
 
 def test_scalers_fit_only_train(days_db: Path) -> None:

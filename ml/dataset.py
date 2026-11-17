@@ -103,6 +103,17 @@ _TIME_ORIGIN = datetime(2000, 1, 1)
 DayRole = Literal["train", "val", "test"]
 """Роль целого дня сим-эпохи; ``None`` — время вне ролей."""
 
+DeficitRule = Literal["legacy", "harm"]
+"""Правило метки дефицита ML-контура (change ``ml-harm-deficit-label``).
+
+``legacy`` — правило контракта данных (:data:`DEFICIT_RATIO_LIMIT` или
+``unfulfilled > 0``), ``harm`` — только вред: ``unfulfilled > 0`` (истёкшие
+заказы и отказы пассажиров от долгой подачи). Правило выбирается ключом
+``ml.deficit_label`` и применяется одинаково во всём ML-контуре; показатели
+мира (``Summary.deficit_share``, калибровка) и реактивная политика от него не
+зависят.
+"""
+
 
 def bucket_index(ts: datetime, agg_step_min: int = 5) -> int:
     """Номер 5-минутного бакета, содержащего момент ``ts`` (метка начала бакета)."""
@@ -123,16 +134,28 @@ def _minute_index(ts: datetime) -> int:
     return int((ts - _TIME_ORIGIN).total_seconds()) // 60
 
 
-def deficit_label(requests: float, free_drivers: float, unfulfilled: float) -> bool:
-    """Правило дефицита контракта: низкое обеспечение **или** истёкшие заказы.
+def deficit_label(
+    requests: float,
+    free_drivers: float,
+    unfulfilled: float,
+    rule: DeficitRule = "legacy",
+) -> bool:
+    """Метка дефицита строки метрик по правилу ``rule`` (change ``ml-harm-deficit-label``).
 
-    Единственное правило для меток датасета — то же, что ``Summary.deficit_share``
-    движка (``simulator.aggregate``): ``free_drivers / max(requests, 1) < 0.5``
-    или ``unfulfilled > 0``; порог строгий, граница ровно 0.5 дефицитом не
-    считается.
+    ``legacy`` (дефолт) — правило контракта данных: низкое обеспечение **или**
+    истёкшие заказы — ``free_drivers / max(requests, 1) < 0.5`` или
+    ``unfulfilled > 0`` (то же, что ``Summary.deficit_share`` движка); порог
+    строгий, граница ровно 0.5 дефицитом не считается. ``harm`` — только вред:
+    ``unfulfilled > 0`` (колонка считает и истёкшие заказы, и отказы пассажиров
+    от долгой подачи). Значение вне двух допустимых — ``ValueError``: опечатка
+    в коде не должна превращаться в тихое ``legacy``.
     """
 
-    return free_drivers / max(requests, 1) < DEFICIT_RATIO_LIMIT or unfulfilled > 0
+    if rule == "legacy":
+        return free_drivers / max(requests, 1) < DEFICIT_RATIO_LIMIT or unfulfilled > 0
+    if rule == "harm":
+        return unfulfilled > 0
+    raise ValueError(f"неизвестное правило метки дефицита {rule!r}: ожидается 'legacy' или 'harm'")
 
 
 def world_start(cfg: AppConfig) -> datetime:
@@ -394,11 +417,13 @@ def build_targets(
     ts: datetime,
     *,
     horizons_min: Sequence[int] = RET_HORIZONS_MIN,
+    label_rule: DeficitRule = "legacy",
 ) -> Targets | None:
     """Таргеты из точечных бакетов ts+H; нет бакета горизонта — ``None``.
 
     Значения — requests и free_drivers строки метрик ровно бакета ts+H; метка
-    дефицита — правило контракта (:func:`deficit_label`) по той же строке.
+    дефицита — :func:`deficit_label` по правилу ``label_rule`` (``ml.deficit_label``)
+    на той же строке; признаки окна от правила не зависят.
     """
 
     requests: list[float] = []
@@ -410,7 +435,9 @@ def build_targets(
             return None
         requests.append(point.requests)
         free_drivers.append(point.free_drivers)
-        deficit.append(deficit_label(point.requests, point.free_drivers, point.unfulfilled))
+        deficit.append(
+            deficit_label(point.requests, point.free_drivers, point.unfulfilled, rule=label_rule)
+        )
     return Targets(tuple(requests), tuple(free_drivers), tuple(deficit))
 
 
@@ -435,13 +462,16 @@ def collect_examples(
     window_hours: float,
     agg_step_min: int = 5,
     horizons_min: Sequence[int] = RET_HORIZONS_MIN,
+    label_rule: DeficitRule = "legacy",
 ) -> dict[str, Examples]:
     """Собрать примеры по всем (зона, ts) эпохи и разложить по ролям дней.
 
     Перебирает бакеты, где у примера есть и полная история окна, и оба таргета
     (границы берутся из :meth:`RowSource.time_range`); моменты вне ролей
     (до train/после test) пропускаются. Пустая роль получает массивы формы
-    (0, …), совместимые с fit/transform. Роли считает :func:`day_role`.
+    (0, …), совместимые с fit/transform. Роли считает :func:`day_role`; метка
+    дефицита таргетов — правило ``label_rule`` (``ml.deficit_label``), окна и
+    регрессионные таргеты от него не зависят.
     """
 
     steps = int(window_hours * 60 // agg_step_min)
@@ -467,7 +497,9 @@ def collect_examples(
             window = build_window(
                 source, zone_id, ts, window_hours=window_hours, agg_step_min=agg_step_min
             )
-            targets = build_targets(source, zone_id, ts, horizons_min=horizons_min)
+            targets = build_targets(
+                source, zone_id, ts, horizons_min=horizons_min, label_rule=label_rule
+            )
             if window is None or targets is None:
                 continue
             windows[role].append(window)

@@ -117,6 +117,7 @@ ml:                             # приложение А плана M3 (change 
   patience: 8
   cls_weight: 1.0               # вес BCE в общем loss
   seed: 42                      # отдельный от мира seed обучения
+  deficit_label: legacy         # метка ML-контура (change ml-harm-deficit-label): legacy | harm
 
 policy:                         # ценовые политики (change m6-policy; прил. А плана M5+M6)
   horizon_min: 15               # лучший test-F1; фиксируется до генерации веток

@@ -216,7 +216,11 @@ def _run_infer(args: argparse.Namespace) -> int:
                 source, conn, cfg=cfg, models=args.models, artifacts_root=ARTIFACTS_ROOT
             )
             summary_path, table = summarize_run(
-                conn, source, versions, artifacts_root=ARTIFACTS_ROOT
+                conn,
+                source,
+                versions,
+                label_rule=cfg.ml.deficit_label,
+                artifacts_root=ARTIFACTS_ROOT,
             )
         finally:
             conn.close()

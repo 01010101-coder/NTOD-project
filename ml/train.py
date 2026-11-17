@@ -94,9 +94,10 @@ def prepare_training_data(
     """Собрать обучающие данные из БД эпохи (задача 1.1).
 
     Роли дней — ``ml.train_days/val_days/test_days`` от ``start`` (:func:
-    `ml.dataset.day_role`), окна — ``ml.window_hours``. Scaler'ы обучаются на
-    train-роли и нормализуют окна и регрессионные таргеты всех ролей;
-    ``pos_weight`` BCE считается по train-меткам дефицита. Пустая роль train
+    `ml.dataset.day_role`), окна — ``ml.window_hours``, метка дефицита —
+    правило ``ml.deficit_label``. Scaler'ы обучаются на train-роли и
+    нормализуют окна и регрессионные таргеты всех ролей; ``pos_weight`` BCE
+    считается по train-меткам дефицита выбранного правила. Пустая роль train
     или val — ``ValueError`` до построения сети.
     """
 
@@ -108,6 +109,7 @@ def prepare_training_data(
         val_days=ml_cfg.val_days,
         test_days=ml_cfg.test_days,
         window_hours=ml_cfg.window_hours,
+        label_rule=ml_cfg.deficit_label,
     )
     for role in ("train", "val"):
         if splits[role].windows.shape[0] == 0:
@@ -311,6 +313,10 @@ def save_model_artifacts(
     state_dict, ml_cfg: снимок}), scalers.pkl, loss.json (кривая по эпохам),
     metrics.json (итоги обучения). Существующий каталог — ``FileExistsError``
     до всякой записи: повтор в ту же дату — явный отказ (решение 4 design.md).
+
+    Снимок ml-секции содержит ``deficit_label`` — правило, на котором обучена
+    сеть (change ``ml-harm-deficit-label``); итоговые метрики дублируют его
+    полем ``deficit_label``.
     """
 
     model_dir = Path(model_dir)
@@ -329,6 +335,7 @@ def save_model_artifacts(
         "arch": arch,
         "window_hours": ml_cfg.window_hours,
         "seed": ml_cfg.seed,
+        "deficit_label": ml_cfg.deficit_label,
         "pos_weight": data.pos_weight,
         "n_train": int(data.windows["train"].shape[0]),
         "n_val": int(data.windows["val"].shape[0]),

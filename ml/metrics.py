@@ -5,7 +5,8 @@
 контракта ``forecasts`` (dict-строки наивов или ``sqlite3.Row`` из
 ``list_forecasts``) плюс :class:`RowSource` для факта; соединение — по
 (ts, zone_id, horizon_min), факт целевого бакета — ``metrics_at(ts + H)``,
-метка дефицита — правило контракта (:func:`ml.dataset.deficit_label`). Строка
+метка дефицита — :func:`ml.dataset.deficit_label` по правилу ``label_rule``
+(``ml.deficit_label``; change ``ml-harm-deficit-label``). Строка
 без пары к факту исключается из всех метрик, без падений и подстановок нулей
 (спека «Прогноз без пары к факту»).
 
@@ -23,7 +24,7 @@ from collections.abc import Callable, Mapping, Sequence
 import numpy as np
 
 from common.timeutil import add_minutes, from_iso
-from ml.dataset import RowSource, deficit_label
+from ml.dataset import DeficitRule, RowSource, deficit_label
 
 DEFICIT_PROB_THRESHOLD = 0.5
 """Порог детекции: ``deficit_prob >= порог`` — «прогноз предсказал дефицит»."""
@@ -71,11 +72,14 @@ _COLUMN_WIDTH = 10
 """Ширина числовой колонки рендера (самое длинное имя — «RMSE_req15»)."""
 
 
-def join_facts(rows: Sequence[Mapping], source: RowSource) -> list[dict]:
+def join_facts(
+    rows: Sequence[Mapping], source: RowSource, *, label_rule: DeficitRule = "legacy"
+) -> list[dict]:
     """Соединить строки прогнозов с фактом целевого бакета ts + horizon_min.
 
     Строка без факта (бакета ts+H нет в источнике) — молчаливый пропуск.
-    Время на входе — наивный ``datetime`` или ISO-текст БД. Результат
+    Время на входе — наивный ``datetime`` или ISO-текст БД. ``fact_deficit`` —
+    правило ``label_rule`` (``ml.deficit_label``). Результат
     отсортирован по (ts, zone_id, horizon_min) — канонический порядок
     суммирования, гарантирующий одинаковые биты результата при любом порядке
     входных строк.
@@ -101,7 +105,9 @@ def join_facts(rows: Sequence[Mapping], source: RowSource) -> list[dict]:
                 "fact_requests": float(point.requests),
                 "fact_free_drivers": float(point.free_drivers),
                 "fact_deficit": bool(
-                    deficit_label(point.requests, point.free_drivers, point.unfulfilled)
+                    deficit_label(
+                        point.requests, point.free_drivers, point.unfulfilled, rule=label_rule
+                    )
                 ),
             }
         )
@@ -195,15 +201,22 @@ def calibration_table(paired: Sequence[Mapping], horizon: int) -> list[dict]:
     return table
 
 
-def build_summary(model_version: str, rows: Sequence[Mapping], source: RowSource) -> dict:
+def build_summary(
+    model_version: str,
+    rows: Sequence[Mapping],
+    source: RowSource,
+    *,
+    label_rule: DeficitRule = "legacy",
+) -> dict:
     """Сводная одной версии модели: регрессии, дефицит и калибровка.
 
     Структура: ``model_version`` + таргет × горизонт → MAE/RMSE + горизонт →
-    precision/recall/F1 + горизонт → бины калибровки. Все числа — встроенные
-    float/int (JSON-совместимость, решение 5 design.md); горизонтов без пар —
-    пустые разделы, рендер читает их как 0.0.
+    precision/recall/F1 + горизонт → бины калибровки. Факт дефицита (и F1, и
+    доля сбывшихся в бинах) — правило ``label_rule`` (``ml.deficit_label``).
+    Все числа — встроенные float/int (JSON-совместимость, решение 5 design.md);
+    горизонтов без пар — пустые разделы, рендер читает их как 0.0.
     """
-    paired = join_facts(rows, source)
+    paired = join_facts(rows, source, label_rule=label_rule)
     horizons = sorted({int(r["horizon_min"]) for r in paired})
     return {
         "model_version": model_version,

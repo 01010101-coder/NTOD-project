@@ -188,6 +188,21 @@ def test_naive_persist_deficit_via_unfulfilled() -> None:
     assert all(r["deficit_prob"] == 1.0 for r in naive_persist(source, NOON, Z0))
 
 
+def test_naive_persist_harm_rule() -> None:
+    """Спека «Наив по вреду»: при harm бакет (10, 3, 0) — не вред, поэтому
+    deficit_prob = 0.0 на обоих горизонтах при тех же значениях прогноза;
+    сценарий legacy на тех же метриках остаётся 1.0."""
+    source = FakeSource({(Z0, NOON): MetricPoint(10.0, 3.0, 0.0)})
+    rows = naive_persist(source, NOON, Z0, label_rule="harm")
+    assert len(rows) == 2
+    assert [r["horizon_min"] for r in rows] == [15, 30]
+    assert [r["deficit_prob"] for r in rows] == [0.0, 0.0]
+    assert [r["pred_requests"] for r in rows] == [10.0, 10.0]
+    assert [r["pred_free_drivers"] for r in rows] == [3.0, 3.0]
+    assert all(r["model_version"] == NAIVE_PERSIST_V1 for r in rows)
+    assert [r["deficit_prob"] for r in naive_persist(source, NOON, Z0)] == [1.0, 1.0]
+
+
 def test_naive_persist_missing_bucket_silent() -> None:
     """Нет бакета ts — молчаливый пропуск: пустой список, без исключений."""
 
@@ -353,6 +368,26 @@ def test_join_facts_accepts_db_text_time() -> None:
     as_dt = _forecast_row(NOON, Z0, 15, 11.0, 5.0, 1.0)
     as_text = dict(as_dt, ts=to_iso(NOON))
     assert join_facts([as_dt], FakeSource(facts)) == join_facts([as_text], FakeSource(facts))
+
+
+def test_join_facts_harm_rule_false_positive() -> None:
+    """Спека «Факт по вреду»: прогноз 0.9 при free/requests < 0.5 и
+    unfulfilled = 0 — FP при harm (дефицит не случился) и TP при legacy;
+    калибровка при harm считает долю сбывшихся по вреду."""
+    facts = {(Z0, add_minutes(NOON, 15)): MetricPoint(10.0, 3.0, 0.0)}
+    rows = [_forecast_row(NOON, Z0, 15, 9.0, 3.0, 0.9)]
+    source = FakeSource(facts)
+    legacy = join_facts(rows, source)
+    harm = join_facts(rows, source, label_rule="harm")
+    assert legacy[0]["fact_deficit"] is True
+    assert harm[0]["fact_deficit"] is False
+    assert deficit_metrics(legacy)[15]["precision"] == 1.0  # TP
+    assert deficit_metrics(harm)[15] == {"precision": 0.0, "recall": 0.0, "f1": 0.0}  # FP
+    summary = build_summary("handwritten-v1", rows, source, label_rule="harm")
+    assert summary["calibration"][15][0]["deficit_share"] == 0.0  # бина 0.9 нет сбывшихся
+    assert (
+        build_summary("handwritten-v1", rows, source)["calibration"][15][0]["deficit_share"] == 1.0
+    )
 
 
 # ---------------------------------------------------------------------------
