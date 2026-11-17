@@ -26,6 +26,7 @@ import pytest
 from common.config import AppConfig
 from common.timeutil import add_minutes, from_iso, to_iso
 from simulator.__main__ import SqliteTripWriter
+from simulator.drivers import DriverState
 from simulator.engine import Engine
 from simulator.live import (
     AssignEvent,
@@ -449,6 +450,7 @@ def test_online_drivers_equals_fleet_without_shifts():
     _summary, records, _conn = run_with_records(cfg, 1)
     assert records
     assert all(record.online_drivers == cfg.drivers.count for record in records)
+    assert all(record.part_online == 0 for record in records)
 
 
 def test_online_drivers_consistent_with_free_park():
@@ -478,3 +480,61 @@ def test_online_drivers_follow_profile():
         record.t.hour: record for record in records if record.t.date() == SIM_START_DT.date()
     }
     assert by_hour[3].online_drivers < by_hour[18].online_drivers
+
+
+# --- Подработчики в записи минуты (change world-elastic-supply, задача 5.1) ---
+
+
+def six_zone_config(**overrides) -> AppConfig:
+    """Мир на дефолтных шести зонах: без спавна, дождя и surge-инъекций.
+
+    Профиль смен и вызов подработчиков включаются секцией ``drivers``; зоны и
+    дороги — канон конфига, поэтому сигнал водителям адресуется зоне 5.
+    """
+
+    base = {
+        "seed": 7,
+        "population": {"scale": 0.0},
+        "drivers": {"count": 20, "wait_limit_min": 6},
+        "weather": {
+            "rain_day_chance": 0.0,
+            "episode_start_h": [0, 0],
+            "episode_duration_h": [1, 1],
+        },
+        "pricing": {"surge_injection": {"day_chance": 0.0}},
+    }
+    base.update(overrides)
+    return AppConfig.model_validate(base)
+
+
+def test_part_online_visible_in_record():
+    """Сценарий «Подработчики видны в записи минуты»: 0 до 20-й минуты, дальше > 0."""
+
+    cfg = six_zone_config(
+        drivers={
+            "count": 20,
+            "wait_limit_min": 6,
+            "shifts": {"enabled": True},
+            "callout": {"enabled": True, "part": 60, "lag_min": 20},
+        }
+    )
+    engine = Engine(cfg, driver_signal_fn=lambda zone_id, _t: 1.3 if zone_id == 5 else 1.0)
+    observed: list[tuple[MinuteRecord, int]] = []
+
+    def observe(record: MinuteRecord) -> None:
+        staff_online = sum(
+            1
+            for driver_id in range(cfg.drivers.count)
+            if engine._fleet._drivers[driver_id].state is not DriverState.OFFLINE
+        )
+        observed.append((record, staff_online))
+
+    conn = connect(":memory:")
+    init_db(conn)
+    engine.run(1 / 24, SqliteTripWriter(conn), on_minute=observe)
+
+    main_phase = observed[: 24 * 60]
+    assert all(record.part_online == 0 for record, _staff in main_phase[:20])
+    assert all(record.part_online > 0 for record, _staff in main_phase[20:])
+    for record, staff_online in main_phase:
+        assert record.online_drivers == staff_online + record.part_online

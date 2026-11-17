@@ -16,7 +16,10 @@ surge-инъекции), третий — отказ пассажира от д�
 только по периметру ``run`` — для ``progress.elapsed_sec`` и ``Summary.wall_sec``
 (§5). Шов ``price_fn`` (§10.13) подменяет числовой тариф зон, не трогая
 розыгрыши среды: ``env.advance_day`` вызывается безусловно, экзогенный поток
-не сдвигается, ветки A/B на одном seed сравнимы попарно.
+не сдвигается, ветки A/B на одном seed сравнимы попарно. Шов
+``driver_signal_fn`` (change ``world-elastic-supply``) подменяет сигнал
+водителям — отдельный от цены пассажиру канал, который читают только решения
+водителей: отклик предложения и вызов подработчиков.
 """
 
 import time
@@ -31,6 +34,7 @@ import numpy as np
 from common.config import AppConfig, DispatchCfg
 from common.timeutil import add_minutes, bucket5, from_iso, to_iso
 from simulator.aggregate import AggregateBuffer, _is_deficit
+from simulator.callout import plan_callouts
 from simulator.city import build_city
 from simulator.demand import TripRequest, _is_expired, spawn_requests
 from simulator.drivers import DriverState, Fleet, travel_minutes
@@ -92,6 +96,12 @@ class Summary:
     отказы не входят); ``deficit_share`` — доля дефицитных 5-минуток по
     правилу §3.8 в процентах; ``wall_sec`` — wall-время прогона (замер только
     по периметру ``run``, §5).
+
+    ``callouts`` и ``callout_minutes`` — стоимость меры вызова подработчиков
+    (change ``world-elastic-supply``, спека simulator-loop): число вызванных
+    за прогон и суммарные минуты подработчиков на линии. Оба поля добавлены
+    последними с дефолтом 0: при выключенном вызове они равны 0, а
+    существующие конструкторы ``Summary`` не ломаются.
     """
 
     days: int
@@ -105,6 +115,8 @@ class Summary:
     avg_wait_min: float
     deficit_share: float
     wall_sec: float
+    callouts: int = 0
+    callout_minutes: int = 0
 
 
 @dataclass
@@ -128,14 +140,15 @@ class Engine:
 
     Шаги каждой сим-минуты: (1) среда; (1а) поминутное накопление среды в буфер
     агрегации (design, решение 3); (1б) смены водителей при включённом
-    ``drivers.shifts`` (change ``world-driver-shifts``); (2) спавн; (3) диспатч;
-    (3а) отклик предложения — переезды свободных к надбавке при включённом
-    ``drivers.reposition`` (change ``m6-supply-response``); (4) движение;
-    (5) истечения; (6) на каждой ``agg_step_min``-й минуте — снапшот парка и
-    сброс окна агрегата. Батчи строк writer'у уходят раз в сим-час (§5). После
-    основной фазы — дренаж хвоста (proposal, вопрос 1): шаги 4–5 без спавна,
-    диспатча и агрегации до терминального состояния всех заказов; строки метрик
-    за хвост не пишутся.
+    ``drivers.shifts`` (change ``world-driver-shifts``); (1в) вызов подработчиков
+    при включённом ``drivers.callout`` (change ``world-elastic-supply``);
+    (2) спавн; (3) диспатч; (3а) отклик предложения — переезды свободных к
+    надбавке при включённом ``drivers.reposition`` (change
+    ``m6-supply-response``); (4) движение; (5) истечения; (6) на каждой
+    ``agg_step_min``-й минуте — снапшот парка и сброс окна агрегата. Батчи
+    строк writer'у уходят раз в сим-час (§5). После основной фазы — дренаж
+    хвоста (proposal, вопрос 1): шаги 4–5 без спавна, диспатча и агрегации до
+    терминального состояния всех заказов; строки метрик за хвост не пишутся.
     """
 
     def __init__(
@@ -144,8 +157,9 @@ class Engine:
         *,
         seed: int | None = None,
         price_fn: Callable[[int, datetime], float] | None = None,
+        driver_signal_fn: Callable[[int, datetime], float] | None = None,
     ) -> None:
-        """Собрать мир по конфигу: три rng-потока (§3 плана M5+M6), среда, парк, шов тарифа.
+        """Собрать мир по конфигу: три rng-потока (§3 плана M5+M6), среда, парк, швы.
 
         ``seed=None`` → ``cfg.seed``; из ``np.random.SeedSequence(seed).spawn(3)``
         создаются три дочерних генератора в фиксированном порядке
@@ -159,6 +173,14 @@ class Engine:
         водитель ``i`` в зоне ``i mod Z`` (§10.14). Внутренние id заказов —
         счётчик с 1 в порядке создания (§10.11). ``price_fn`` — шов §10.13:
         подменяет числовой множитель тарифа зон, розыгрыши среды продолжаются.
+        ``driver_signal_fn`` — шов сигнала водителям (change
+        ``world-elastic-supply``): ``None`` — сигнал равен фактическому тарифу
+        зоны на минуту.
+
+        При ``drivers.callout.enabled`` парк — ``drivers.count + callout.part``:
+        штатные ``[0, count)`` живут по сменам, подработчики ``[count, count +
+        part)`` стоят вне линии до первой минуты и выходят только по вызову
+        (design, решения 1 и 3).
         """
 
         self._cfg = cfg
@@ -168,9 +190,13 @@ class Engine:
         self._rng_env = np.random.default_rng(exo_seq)  # экзогенный: среда (шаг 1)
         self._rng_cancel = np.random.default_rng(cancel_seq)  # отказ пассажира (шаг 3)
         self._price_fn = price_fn
+        self._driver_signal_fn = driver_signal_fn
         self._city = build_city(cfg)
         self._env = WorldEnv(cfg, self._rng_env)
-        self._fleet = Fleet(cfg.drivers.count, len(self._city.zones))
+        self._callout = cfg.drivers.callout
+        part = self._callout.part if self._callout.enabled else 0
+        self._fleet_size = cfg.drivers.count + part
+        self._fleet = Fleet(self._fleet_size, len(self._city.zones))
         self._next_trip_id = 1  # внутренние id заказов: счётчик с 1 (§10.11)
         # Зеркало свободных водителей (резерв §5 — производительность): списки
         # отсортированных id по зонам. Состояние парка меняется в четырёх
@@ -185,6 +211,25 @@ class Engine:
         for driver_id in range(cfg.drivers.count):
             self._free_ids[driver_id % zone_count].append(driver_id)
         self._iso_cache: dict[datetime, str] = {}
+        # Состояние вызова подработчиков (design, решение 3) — приватные поля
+        # движка, как ``_free_ids``: новых состояний и методов у ``Fleet`` нет.
+        # Резерв — подработчики вне линии, ещё не вызванные (отсортирован);
+        # очередь вызванных — ``(момент выхода, зона, driver_id)``; окончания
+        # сессий — ``{driver_id: момент}``; ушедшие после заказа по метке
+        # ухода — множество id, ждущих возврата в резерв на шаге 1в.
+        self._part_ids: tuple[int, ...] = tuple(range(cfg.drivers.count, self._fleet_size))
+        self._part_reserve: list[int] = []
+        self._part_called: list[tuple[datetime, int, int]] = []
+        self._part_session_end: dict[int, datetime] = {}
+        self._part_leaving: set[int] = set()
+        for driver_id in self._part_ids:
+            # До первой минуты прогона все подработчики вне линии и в резерве.
+            self._fleet.go_offline(driver_id)
+            self._part_reserve.append(driver_id)
+        # Счётчики стоимости меры (спека simulator-loop): ведутся только в
+        # основной фазе, ``run`` обнуляет их в начале.
+        self._callouts = 0
+        self._callout_minutes = 0
 
     def _tariff_mult(self, zone_id: int, t: datetime) -> float:
         """Источник тарифа (design, решение 4): ``price_fn`` или ``WorldEnv``.
@@ -283,6 +328,99 @@ class Engine:
             "price_multiplier": active.trip.price_multiplier,
         }
 
+    def _part_offline_count(self) -> int:
+        """Число подработчиков вне линии (``OFFLINE``) — для сверки шага смен.
+
+        Подработчики — хвост id ``[drivers.count, count + part)``; вне линии
+        стоят и резерв, и вызванные, ещё не вышедшие (design, решение 3).
+        """
+
+        if not self._part_ids:
+            return 0
+        drivers = self._fleet._drivers
+        return sum(
+            1 for driver_id in self._part_ids if drivers[driver_id].state is DriverState.OFFLINE
+        )
+
+    def _part_online_count(self) -> int:
+        """Число подработчиков на линии (в любом состоянии, кроме ``offline``)."""
+
+        return len(self._part_ids) - self._part_offline_count()
+
+    def _part_leaving_count(self) -> int:
+        """Число подработчиков с меткой ухода (для сверки цели смен за O(part)).
+
+        Считается по фактическим меткам ``Fleet``: подработчик с истёкшей
+        сессией, уже ушедший по высадке, метку теряет и в это число не входит,
+        хотя до шага возврата в резерв ещё лежит в ``_part_leaving``.
+        """
+
+        if not self._part_ids:
+            return 0
+        return sum(1 for driver_id in self._part_ids if self._fleet.is_leaving(driver_id))
+
+    def _apply_callouts(
+        self,
+        t: datetime,
+        k: int,
+        signal_by_zone: np.ndarray,
+    ) -> None:
+        """Шаг 1в цикла — вызов подработчиков (спека simulator-loop, решение 5).
+
+        Порядок внутри шага: (1) вернуть в резерв ушедших после заказа или
+        переезда по метке ухода → (2) закрыть истёкшие сессии: свободный уходит
+        с линии сразу, занятый получает метку ухода и уйдёт по завершении
+        текущей работы → (3) выпустить вызванных, у кого наступил момент выхода
+        (они доступны диспатчу этой же минуты) → (4) на минутах ``k mod
+        every_min == 0`` — решения чистого правила ``plan_callouts`` по
+        текущему резерву и сигналу водителям. Шаг детерминирован и rng не
+        тратит. Вызывается только в основной фазе при ``drivers.callout.enabled``.
+        """
+
+        drivers = self._fleet._drivers
+        # (1) Возврат ушедших: парк перевёл их в OFFLINE по метке ухода.
+        for driver_id in sorted(self._part_leaving):
+            if drivers[driver_id].state is DriverState.OFFLINE:
+                self._part_leaving.discard(driver_id)
+                insort(self._part_reserve, driver_id)
+        # (2) Закрытие истёкших сессий: свободный уходит сразу, занятый — меткой.
+        for driver_id in sorted(self._part_session_end):
+            if t < self._part_session_end[driver_id]:
+                continue
+            state = drivers[driver_id].state
+            if state is DriverState.OFFLINE:
+                # Водителя уже нет на линии (вернулся в резерв шагом 1) — сессия закрыта.
+                del self._part_session_end[driver_id]
+            elif state is DriverState.FREE:
+                self._free_ids[drivers[driver_id].zone].remove(driver_id)
+                self._fleet.go_offline(driver_id)
+                del self._part_session_end[driver_id]
+                insort(self._part_reserve, driver_id)
+            else:
+                # Занятый доезжает текущий заказ или переезд и уходит по завершении.
+                self._fleet.mark_leaving(driver_id)
+                self._part_leaving.add(driver_id)
+                del self._part_session_end[driver_id]
+        # (3) Выход вызванных: свободен в зоне вызова, доступен диспатчу минуты.
+        while self._part_called and self._part_called[0][0] <= t:
+            _due, zone, driver_id = self._part_called.pop(0)
+            self._fleet.go_online(driver_id, zone)
+            insort(self._free_ids[zone], driver_id)
+            self._part_session_end[driver_id] = add_minutes(t, self._callout.session_min)
+        # (4) Решения раз в every_min минут по текущему резерву.
+        if k % self._callout.every_min == 0 and self._part_reserve:
+            for driver_id, zone in plan_callouts(self._part_reserve, signal_by_zone, self._callout):
+                # Вызванный сразу покидает резерв, а на линию выйдет на шаге 3
+                # минуты ``t + lag_min``; все вызванные уходят из резерва.
+                self._part_reserve.remove(driver_id)
+                insort(
+                    self._part_called,
+                    (add_minutes(t, self._callout.lag_min), zone, driver_id),
+                )
+                self._callouts += 1
+        # Стоимость меры: минуты подработчиков на линии на конец шага вызова.
+        self._callout_minutes += self._part_online_count()
+
     def _apply_shifts(self, t: datetime) -> None:
         """Шаг 1б цикла — сверка числа водителей на смене с целью минуты.
 
@@ -294,12 +432,21 @@ class Engine:
         ``id mod Z`` и доступны диспатчу этой же минуты. Шаг детерминирован и
         rng не тратит. Вызывается только в основной фазе при
         ``drivers.shifts.enabled``.
+
+        Считается и двигается только штатный парк ``[0, drivers.count)``
+        (change ``world-elastic-supply``, решение 4): ``O = count −
+        (offline_count − part_offline) − (leaving_count − part_leaving)``, где
+        счётчики подработчиков ведутся движком.
         """
 
         count = self._cfg.drivers.count
         zone_count = len(self._city.zones)
         target = online_target(self._cfg.drivers, t)
-        online = count - self._fleet.offline_count() - self._fleet.leaving_count()
+        online = (
+            count
+            - (self._fleet.offline_count() - self._part_offline_count())
+            - (self._fleet.leaving_count() - self._part_leaving_count())
+        )
         drivers = self._fleet._drivers
         if online > target:
             excess = online - target
@@ -478,6 +625,10 @@ class Engine:
         event_mult = self._cfg.events.friday_evening.demand_mult
         zone_count = len(self._city.zones)
         buffer = AggregateBuffer(zone_count)
+        # Счётчики стоимости меры относятся к прогону, а не к объекту движка.
+        self._callouts = 0
+        self._callout_minutes = 0
+        callout_enabled = self._callout.enabled
 
         waiting: list[_ActiveTrip] = []  # ожидающие назначения
         in_flight: dict[int, _ActiveTrip] = {}  # назначенные, ключ — driver_id
@@ -503,6 +654,17 @@ class Engine:
             price_mult_by_zone = np.array(
                 [self._tariff_mult(zone.id, t) for zone in self._city.zones], dtype=float
             )
+            # Сигнал водителям (change world-elastic-supply, решение 6): без шва
+            # это тот же массив, что тариф, поэтому отклик предложения побитово
+            # прежний. Шов отделяет «что видят водители» от «что платит
+            # пассажир»: спрос и price_multiplier заказов его не читают.
+            if self._driver_signal_fn is None:
+                signal_by_zone = price_mult_by_zone
+            else:
+                signal_by_zone = np.array(
+                    [self._driver_signal_fn(zone.id, t) for zone in self._city.zones],
+                    dtype=float,
+                )
             for zone in self._city.zones:
                 buffer.set_env(
                     zone.id,
@@ -515,6 +677,11 @@ class Engine:
             # его не получили. При выключенных сменах шаг пропускается целиком.
             if self._cfg.drivers.shifts.enabled:
                 self._apply_shifts(t)
+            # Шаг 1в: вызов подработчиков (change world-elastic-supply) — после
+            # смен и до спавна: вышедший по вызову доступен диспатчу этой же
+            # минуты. При выключенном вызове шаг пропускается целиком.
+            if callout_enabled:
+                self._apply_callouts(t, k, signal_by_zone)
             # Списки событий минуты — только при наблюдателе (design, решение 6):
             # при ``on_minute=None`` ни списки, ни записи не строятся.
             if on_minute is not None:
@@ -552,8 +719,10 @@ class Engine:
             # шаг пропускается целиком. Диспатч детерминирован и rng не потребляет
             # (розыгрыши — только в среде и спавне), поэтому пропуск не меняет ни
             # поток разыгрываний, ни строки таблиц; очередь к следующей минуте
-            # всё равно сортируется перед диспатчем.
-            if waiting and len(in_flight) < self._cfg.drivers.count:
+            # всё равно сортируется перед диспатчем. Размер парка — ``fleet_size``
+            # (с подработчиками), иначе занятые подработчики молча выключали бы
+            # поиск свободной машины (решение 8).
+            if waiting and len(in_flight) < self._fleet_size:
                 waiting.sort(key=lambda active: (active.trip.created_at, active.internal_id))
                 still_waiting: list[_ActiveTrip] = []
                 travel_k = self._cfg.weather.travel_mult if is_rain else 1.0
@@ -636,14 +805,16 @@ class Engine:
                 waiting = still_waiting
             # Шаг 3а: отклик предложения — переезды свободных к надбавке
             # (change m6-supply-response). Только при ``enabled`` и на минутах
-            # решения; вход — зеркало свободных после диспатча и фактический
-            # тариф минуты. Правило детерминировано и rng не тратит.
+            # решения; вход — зеркало свободных после диспатча и сигнал
+            # водителям минуты (change world-elastic-supply: без шва
+            # ``driver_signal_fn`` это фактический тариф). Правило
+            # детерминировано и rng не тратит.
             reposition = self._cfg.drivers.reposition
             if reposition.enabled and k % reposition.every_min == 0:
                 travel_k = self._cfg.weather.travel_mult if is_rain else 1.0
                 for driver_id, dest_zone in plan_relocations(
                     self._free_ids,
-                    price_mult_by_zone,
+                    signal_by_zone,
                     self._city.path_min,
                     reposition,
                 ):
@@ -703,7 +874,8 @@ class Engine:
                         dropoffs=tuple(live_dropoffs),
                         expiries=tuple(live_expiries),
                         cancellations=tuple(live_cancellations),
-                        online_drivers=self._cfg.drivers.count - self._fleet.offline_count(),
+                        online_drivers=self._fleet_size - self._fleet.offline_count(),
+                        part_online=self._part_online_count(),
                     )
                 )
             # Батчи раз в сим-час — после шага 6 (§5, design решение 5);
@@ -750,7 +922,8 @@ class Engine:
                             ExpiryEvent(internal_id=active.internal_id, origin=active.trip.origin)
                             for active in expired
                         ),
-                        online_drivers=self._cfg.drivers.count - self._fleet.offline_count(),
+                        online_drivers=self._fleet_size - self._fleet.offline_count(),
+                        part_online=self._part_online_count(),
                     )
                 )
         # Финальная выгрузка: строки trips, терминальные в хвосте, не теряются.
@@ -769,4 +942,6 @@ class Engine:
             avg_wait_min=wait_sum / wait_count if wait_count else 0.0,
             deficit_share=100.0 * deficit_rows / metric_rows if metric_rows else 0.0,
             wall_sec=time.perf_counter() - start_wall,
+            callouts=self._callouts,
+            callout_minutes=self._callout_minutes,
         )

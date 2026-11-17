@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from common.config import (
     AppCfg,
     AppConfig,
+    CalloutCfg,
     DispatchCfg,
     DriversCfg,
     EngineCfg,
@@ -485,3 +486,78 @@ def test_online_share_defaults_are_independent_lists() -> None:
     first, second = OnlineShareCfg(), OnlineShareCfg()
     first.weekday[0] = 1.0
     assert second.weekday[0] == DEFAULT_WEEKDAY_SHARE[0]
+
+
+# --- Подсекция вызова подработчиков drivers.callout (change world-elastic-supply) ---
+
+
+def test_callout_defaults_without_subsection(tmp_path: Path) -> None:
+    """Сценарий «Старый конфиг без подсекции»: дефолты, вызов выключен."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("drivers: {count: 380, wait_limit_min: 6}\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.drivers.callout == CalloutCfg()
+    assert cfg.drivers.callout.enabled is False
+    assert cfg.drivers.callout.part == 60
+    assert cfg.drivers.callout.lag_min == 20
+    assert cfg.drivers.callout.session_min == 120
+    assert cfg.drivers.callout.every_min == 5
+    assert cfg.drivers.callout.min_gain == 0.10
+    assert cfg.drivers.callout.sensitivity == 0.3
+    assert cfg.drivers.callout.max_share == 0.3
+
+
+def test_callout_partial_subsection(tmp_path: Path) -> None:
+    """Сценарий «Частичная подсекция»: заданы ``enabled`` и ``lag_min``, остальное — дефолты."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "drivers:\n  callout:\n    enabled: true\n    lag_min: 30\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.drivers.callout.enabled is True
+    assert cfg.drivers.callout.lag_min == 30
+    assert cfg.drivers.callout.part == 60
+    assert cfg.drivers.callout.session_min == 120
+    assert cfg.drivers.callout.every_min == 5
+    assert cfg.drivers.callout.min_gain == 0.10
+    assert cfg.drivers.callout.sensitivity == 0.3
+    assert cfg.drivers.callout.max_share == 0.3
+
+
+def test_callout_reference_config_equals_defaults() -> None:
+    """Эталонный ``config.yaml`` содержит подсекцию, равную дефолтам (задача 1.2)."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    assert cfg.drivers.callout == CalloutCfg()
+    assert cfg.drivers.callout.enabled is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"lag_min": 0},
+        {"session_min": 0},
+        {"every_min": 0},
+        {"part": -1},
+        {"min_gain": -0.1},
+        {"sensitivity": -0.1},
+        {"max_share": 1.5},
+        {"max_share": 0.0},
+    ],
+)
+def test_callout_invalid_values_rejected(payload: dict) -> None:
+    """Сценарий «Недопустимое значение отклоняется»: путь до поля в ошибке."""
+
+    field = next(iter(payload))
+    with pytest.raises(ValidationError, match=rf"drivers\.callout\.{field}"):
+        AppConfig.model_validate({"drivers": {"callout": payload}})
+
+
+def test_callout_unknown_key_rejected() -> None:
+    """Сценарий «Неизвестный ключ отклоняется»: путь ``drivers.callout.bonus_rub``."""
+
+    with pytest.raises(ValidationError, match=r"drivers\.callout\.bonus_rub"):
+        AppConfig.model_validate({"drivers": {"callout": {"bonus_rub": 100.0}}})

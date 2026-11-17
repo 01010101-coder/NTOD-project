@@ -1023,3 +1023,260 @@ def test_shifts_night_load_higher() -> None:
         ) / len(buckets)
 
     assert night_load(enabled=True) > night_load(enabled=False)
+
+
+# --- Сигнал водителям driver_signal_fn (change world-elastic-supply, задача 3.1) ---
+
+
+def _quiet_reference() -> AppConfig:
+    """Эталонный конфиг без дождя и surge-инъекций: тариф среды всюду 1.0."""
+
+    cfg = load_config(REFERENCE_CONFIG).model_copy(deep=True)
+    cfg.weather.rain_day_chance = 0.0
+    cfg.pricing.surge_injection.day_chance = 0.0
+    return cfg
+
+
+def _zone5_signal(zone_id: int, _t: datetime) -> float:
+    """Сигнал водителям: 1.3 в зоне 5, в остальных 1.0."""
+
+    return 1.3 if zone_id == 5 else 1.0
+
+
+def _mean_free_zone5(cfg: AppConfig, minutes: int, **engine_kwargs) -> float:
+    """Среднее ``free_drivers`` зоны 5 по закрытым бакетам прогона."""
+
+    writer = StubWriter()
+    Engine(cfg, seed=REFERENCE_SEED, **engine_kwargs).run(minutes / 1440, writer)
+    rows = [row for row in writer.metrics if row["zone_id"] == 5]
+    assert rows, "у зоны 5 нет ни одного закрытого бакета"
+    return sum(row["free_drivers"] for row in rows) / len(rows)
+
+
+def test_driver_signal_defaults_to_tariff() -> None:
+    """Сценарий «Сигнал по умолчанию — тариф»: два прогона побитово идентичны."""
+
+    cfg = _quiet_reference()
+    cfg.drivers.reposition.enabled = True
+    tariff = lambda _zone_id, _t: 1.0  # noqa: E731 — тариф среды без политики
+
+    plain = StubWriter()
+    Engine(cfg, seed=REFERENCE_SEED, price_fn=tariff).run(2 / 24, plain)
+    signaled = StubWriter()
+    Engine(cfg, seed=REFERENCE_SEED, price_fn=tariff, driver_signal_fn=tariff).run(2 / 24, signaled)
+
+    assert signaled.trips == plain.trips
+    assert signaled.metrics == plain.metrics
+
+
+def test_response_follows_driver_signal_without_price() -> None:
+    """Сценарий «Отклик на сигнал водителям»: карта спроса двигает водителей без цены."""
+
+    cfg = _quiet_reference()  # тариф среды 1.0: price_multiplier строк — эталон
+    cfg.drivers.reposition.enabled = True
+
+    quiet = _mean_free_zone5(cfg, 120)
+    signaled = _mean_free_zone5(cfg, 120, driver_signal_fn=_zone5_signal)
+
+    assert signaled > quiet
+    # Цена пассажиру швом не трогается: тариф среды (1.0) во всех строках.
+    writer = StubWriter()
+    Engine(cfg, seed=REFERENCE_SEED, driver_signal_fn=_zone5_signal).run(120 / 1440, writer)
+    assert writer.metrics
+    assert all(row["price_multiplier"] == 1.0 for row in writer.metrics)
+    assert all(trip["price_multiplier"] == 1.0 for trip in writer.trips)
+
+
+# --- Вызов подработчиков в минутном цикле (change world-elastic-supply, задача 4) ---
+
+
+def _callout_config(
+    *,
+    count: int = 240,
+    part: int = 60,
+    shifts: bool = False,
+    scale: float = 0.0,
+) -> AppConfig:
+    """Эталонный мир с включённым вызовом: без дождя и surge-инъекций."""
+
+    cfg = _quiet_reference()
+    cfg.drivers.count = count
+    cfg.drivers.callout.enabled = True
+    cfg.drivers.callout.part = part
+    cfg.drivers.shifts.enabled = shifts
+    cfg.population.scale = scale
+    return cfg
+
+
+def test_callout_part_starts_offline() -> None:
+    """Сценарий «Подработчики стартуют вне линии»: count 240, part 60."""
+
+    cfg = _callout_config()
+    engine = Engine(cfg, seed=REFERENCE_SEED)
+    records: list = []
+    engine.run(1 / 1440, StubWriter(), on_minute=records.append)
+
+    part_states = [engine._fleet._drivers[driver_id].state for driver_id in engine._part_ids]
+    assert len(part_states) == 60
+    assert all(state is DriverState.OFFLINE for state in part_states)
+    assert sum(records[0].free_by_zone) + sum(engine._fleet.busy_by_zone()) <= 240
+
+
+def test_callout_part_not_in_shift_target() -> None:
+    """Сценарий «Подработчики не входят в цель смен»: штатные на смене равны T(t)."""
+
+    cfg = _callout_config(count=60, part=60, shifts=True)
+    engine = Engine(cfg, seed=REFERENCE_SEED, driver_signal_fn=_zone5_signal)
+    observed: list[tuple[object, int, int]] = []
+
+    def observe(record) -> None:
+        staff_online = sum(
+            1
+            for driver_id in range(cfg.drivers.count)
+            if engine._fleet._drivers[driver_id].state is not DriverState.OFFLINE
+        )
+        staff_leaving = sum(
+            1 for driver_id in range(cfg.drivers.count) if engine._fleet.is_leaving(driver_id)
+        )
+        observed.append((record, staff_online, staff_leaving))
+
+    engine.run(3 / 24, StubWriter(), on_minute=observe)
+
+    main_phase = observed[: 3 * 60]
+    assert max(record.part_online for record, _online, _leaving in main_phase) >= 10
+    for record, staff_online, staff_leaving in main_phase:
+        target = online_target(cfg.drivers, record.t)
+        assert staff_online - staff_leaving == target
+        # Подработчики не уменьшают число штатных на смене и видны отдельно.
+        assert record.online_drivers - record.part_online == staff_online
+
+
+def test_callout_exit_after_lag_and_session_end() -> None:
+    """Сценарии «Выход через задержку» и «Конец сессии» (свободный уходит сразу)."""
+
+    cfg = _callout_config(count=30, part=60)
+    cfg.drivers.callout.every_min = 1000  # решение только на минуте 0
+    engine = Engine(cfg, seed=REFERENCE_SEED, driver_signal_fn=_zone5_signal)
+    records: list = []
+    engine.run(141 / 1440, StubWriter(), on_minute=records.append)
+
+    main_phase = records[:141]
+    staff_free_zone5 = main_phase[0].free_by_zone[5]
+    # Минуты 0…19: вызванные ещё в пути, в зоне 5 только штатные.
+    assert all(record.part_online == 0 for record in main_phase[:20])
+    assert all(record.free_by_zone[5] == staff_free_zone5 for record in main_phase[:20])
+    # Минута 20: пять вызванных свободны в зоне 5 и доступны диспатчу.
+    assert main_phase[20].part_online == 5
+    assert main_phase[20].free_by_zone[5] == staff_free_zone5 + 5
+    # Сессия 120 минут: на минуте выхода (20 + 120) свободные уходят с линии.
+    assert all(record.part_online == 5 for record in main_phase[20:140])
+    assert main_phase[140].part_online == 0
+    assert main_phase[140].free_by_zone[5] == staff_free_zone5
+
+
+def test_callout_session_end_busy_driver_leaves_after_dropoff() -> None:
+    """Сценарий «Конец сессии» для занятого: метка ухода, возврат в резерв после заказа."""
+
+    cfg = _callout_config(count=10, part=60, scale=30.0)
+    cfg.drivers.callout.session_min = 10
+    cfg.drivers.callout.lag_min = 1
+    cfg.drivers.callout.every_min = 1000
+    engine = Engine(cfg, seed=7, driver_signal_fn=_zone5_signal)
+
+    summary = engine.run(1 / 24, StubWriter())
+
+    assert summary.callouts == 5
+    assert summary.callout_minutes > 0
+    # К концу прогона все вызванные вернулись в резерв, включая занятых:
+    # свободные ушли на конце сессии, занятые — после высадки.
+    states = [engine._fleet._drivers[driver_id].state for driver_id in engine._part_ids]
+    assert all(state is DriverState.OFFLINE for state in states)
+    assert len(engine._part_reserve) == 60
+    assert engine._part_leaving == set()
+
+
+def test_callout_deterministic() -> None:
+    """Сценарий «Вызов детерминирован»: таблицы и счётчики равны, вызов был."""
+
+    cfg = _callout_config(count=60, part=30, scale=30.0)
+
+    def run() -> tuple[list[dict], list[dict], object]:
+        writer = StubWriter()
+        summary = Engine(cfg, seed=7, driver_signal_fn=_zone5_signal).run(3 / 24, writer)
+        return writer.trips, writer.metrics, summary
+
+    trips_a, metrics_a, summary_a = run()
+    trips_b, metrics_b, summary_b = run()
+
+    assert trips_a and metrics_a
+    assert trips_a == trips_b
+    assert metrics_a == metrics_b
+    assert summary_a.callouts == summary_b.callouts > 0
+    assert summary_a.callout_minutes == summary_b.callout_minutes > 0
+
+
+def test_callout_counters_zero_when_disabled() -> None:
+    """При выключенном вызове оба счётчика ``Summary`` равны 0."""
+
+    cfg = _quiet_reference()
+    summary = Engine(cfg, seed=REFERENCE_SEED).run(1 / 24, StubWriter())
+    assert summary.callouts == 0
+    assert summary.callout_minutes == 0
+
+
+def test_callout_does_not_consume_rng() -> None:
+    """Сценарий «Вызов не тратит rng»: поминутные дождь и тариф среды совпадают."""
+
+    def snapshot(enabled: bool) -> tuple[list[bool], list[tuple[float, ...]]]:
+        cfg = micro_config(
+            population={"scale": 50.0},
+            drivers={
+                "count": 20,
+                "wait_limit_min": 6,
+                "callout": {"enabled": enabled, "part": 20},
+            },
+            weather={
+                "rain_day_chance": 1.0,
+                "episode_start_h": [0, 20],
+                "episode_duration_h": [1, 3],
+            },
+            pricing={"surge_injection": {"day_chance": 1.0}},
+        )
+        records: list = []
+        Engine(cfg, seed=7).run(2 / 24, StubWriter(), on_minute=records.append)
+        main_phase = records[: 2 * 60]
+        return (
+            [record.is_rain for record in main_phase],
+            [record.price_mult for record in main_phase],
+        )
+
+    rain_off, tariff_off = snapshot(enabled=False)
+    rain_on, tariff_on = snapshot(enabled=True)
+
+    assert rain_on == rain_off
+    assert tariff_on == tariff_off
+
+
+def test_callout_without_signal_keeps_world() -> None:
+    """Сценарий «Включённый вызов без сигнала не меняет мир»: price_fn ≡ 1.0."""
+
+    def run(enabled: bool) -> tuple[list[dict], list[dict], object]:
+        cfg = _quiet_reference()
+        cfg.drivers.count = 120
+        cfg.drivers.shifts.enabled = True
+        cfg.drivers.callout.enabled = enabled
+        cfg.drivers.callout.part = 30
+        writer = StubWriter()
+        summary = Engine(cfg, seed=REFERENCE_SEED, price_fn=lambda _zone_id, _t: 1.0).run(
+            3 / 24, writer
+        )
+        return writer.trips, writer.metrics, summary
+
+    trips_off, metrics_off, summary_off = run(enabled=False)
+    trips_on, metrics_on, summary_on = run(enabled=True)
+
+    assert trips_off and metrics_off
+    assert trips_on == trips_off
+    assert metrics_on == metrics_off
+    assert summary_on.callouts == 0
+    assert summary_off.callouts == 0

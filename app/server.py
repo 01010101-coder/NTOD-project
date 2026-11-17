@@ -351,6 +351,7 @@ def record_to_dict(record: MinuteRecord) -> dict:
         "price_mult": list(record.price_mult),
         "free_by_zone": list(record.free_by_zone),
         "online_drivers": record.online_drivers,
+        "part_online": record.part_online,
         "spawns": [
             {
                 "internal_id": event.internal_id,
