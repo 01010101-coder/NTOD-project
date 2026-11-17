@@ -418,6 +418,49 @@ class AppCfg(_CfgBase):
     days: int = 30
 
 
+class PlanningCfg(_CfgBase):
+    """Прогноз вреда для планирования (change ``ml-planning-forecast``).
+
+    ``horizons_min`` — горизонты упреждения (дефолт 1 и 2 ч), ``window_min`` —
+    ширина окна цели (вред хотя бы в одном бакете окна), ``artifacts_root`` —
+    отдельный корень артефактов, чтобы ``ml.infer.latest_artifact_dir`` M3 их не
+    подхватывал. Ограничения — спека ``config-loading``: горизонты непусты,
+    строго возрастают, кратны 5 и лежат в [15, 240]; окно кратно 5 и лежит в
+    [5, 120].
+    """
+
+    horizons_min: list[int] = Field(default_factory=lambda: [60, 120])
+    window_min: int = 30
+    artifacts_root: str = "artifacts/planning"
+
+    @field_validator("horizons_min")
+    @classmethod
+    def _check_horizons(cls, value: list[int]) -> list[int]:
+        """Горизонты: непустой строго возрастающий список кратных 5 значений [15, 240]."""
+
+        if not value:
+            raise ValueError("horizons_min не может быть пустым списком")
+        previous: int | None = None
+        for horizon in value:
+            if horizon % 5 != 0 or not 15 <= horizon <= 240:
+                raise ValueError(f"горизонт {horizon} обязан быть кратен 5 и лежать в [15, 240]")
+            if previous is not None and horizon <= previous:
+                raise ValueError(f"horizons_min обязан строго возрастать, получено {value}")
+            previous = horizon
+        return value
+
+    @field_validator("window_min")
+    @classmethod
+    def _check_window(cls, value: int) -> int:
+        """Окно цели: кратно 5 и лежит в [5, 120]."""
+
+        if value % 5 != 0 or not 5 <= value <= 120:
+            raise ValueError(
+                f"window_min обязан быть кратен 5 и лежать в [5, 120], получено {value}"
+            )
+        return value
+
+
 class MlCfg(_CfgBase):
     """Машинное обучение (change ``m3-dataset``): эпоха данных и гиперпараметры.
 
@@ -447,6 +490,7 @@ class MlCfg(_CfgBase):
     patience: int = 8
     cls_weight: float = 1.0
     seed: int = 42  # отдельный от мира seed обучения
+    planning: PlanningCfg = Field(default_factory=PlanningCfg)
 
 
 # Стартовые числа политики — приложение А плана M5+M6 (docs/plan-m5-m6-policy.md);

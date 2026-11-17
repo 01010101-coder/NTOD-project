@@ -21,6 +21,7 @@ from common.config import (
     EngineCfg,
     MlCfg,
     OnlineShareCfg,
+    PlanningCfg,
     PolicyCfg,
     PolicyStairCfg,
     RepositionCfg,
@@ -485,3 +486,60 @@ def test_online_share_defaults_are_independent_lists() -> None:
     first, second = OnlineShareCfg(), OnlineShareCfg()
     first.weekday[0] = 1.0
     assert second.weekday[0] == DEFAULT_WEEKDAY_SHARE[0]
+
+
+# ---------------------------------------------------------------------------
+# ml.planning — секция прогноза планирования (change ml-planning-forecast)
+# ---------------------------------------------------------------------------
+
+
+def test_planning_defaults_without_subsection(tmp_path: Path) -> None:
+    """Старый конфиг без ``ml.planning`` грузится: дефолты горизонтов и окна."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("ml:\n  db: data/m3_epoch.db\n  seed: 42\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.ml.planning.horizons_min == [60, 120]
+    assert cfg.ml.planning.window_min == 30
+    assert cfg.ml.planning == PlanningCfg()
+
+
+def test_planning_partial_subsection(tmp_path: Path) -> None:
+    """Задан только ``window_min`` — остальные поля берутся из дефолтов."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("ml:\n  planning:\n    window_min: 45\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.ml.planning.window_min == 45
+    assert cfg.ml.planning.horizons_min == [60, 120]
+    assert cfg.ml.planning.artifacts_root == "artifacts/planning"
+
+
+def test_planning_reference_config_equals_defaults() -> None:
+    """Эталонный ``config.yaml`` содержит подсекцию, равную дефолтам (задача 1.1)."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    assert cfg.ml.planning == PlanningCfg()
+
+
+@pytest.mark.parametrize("bad_horizons", [[120, 60], [], [62]])
+def test_planning_bad_horizons_rejected(bad_horizons: list[int]) -> None:
+    """Неверные ``horizons_min`` отклоняются с путём до ключа (спека config-loading)."""
+
+    with pytest.raises(ValidationError, match=r"ml\.planning\.horizons_min"):
+        AppConfig.model_validate({"ml": {"planning": {"horizons_min": bad_horizons}}})
+
+
+@pytest.mark.parametrize("bad_window", [0, 7, 125])
+def test_planning_bad_window_rejected(bad_window: int) -> None:
+    """Окно цели вне [5, 120] или не кратное 5 отклоняется с путём до ключа."""
+
+    with pytest.raises(ValidationError, match=r"ml\.planning\.window_min"):
+        AppConfig.model_validate({"ml": {"planning": {"window_min": bad_window}}})
+
+
+def test_planning_unknown_key_rejected() -> None:
+    """Неизвестный ключ подсекции отклоняется с полным путём."""
+
+    with pytest.raises(ValidationError, match=r"ml\.planning\.horizon_min"):
+        AppConfig.model_validate({"ml": {"planning": {"horizon_min": 60}}})
