@@ -36,14 +36,20 @@ import pytest
 from common.config import AppConfig, MlCfg, PolicyCfg, load_config
 from ml.dataset import SqliteRowSource
 from ml.infer import collect_role_examples, load_model_artifact
+from ml.planning import prepare_planning_data, save_planning_artifacts, train_planning
 from ml.train import model_version_for, prepare_training_data, save_model_artifacts, train_model
+from simulator.policy import LiveRowSource, PlanningSignalContour
 from simulator.policy_calibration import (
     TOLERANCE,
     calibrate_shifts,
+    calibrate_signal,
     fire_fraction,
     fit_delta,
+    fit_threshold,
     main,
+    threshold_fire_fraction,
     update_config_shift,
+    update_config_threshold,
 )
 from storage.db import connect
 from storage.repo import insert_zone_metrics
@@ -485,3 +491,259 @@ def test_cli_missing_artifacts_exit_2(pattern_db: Path, tmp_path: Path, capsys) 
     assert captured.err.strip() != ""
     assert not (empty_root / "policy-calibration.json").exists()
     assert config_path.read_bytes() == original
+
+
+# ---------------------------------------------------------------------------
+# change policy-driver-signal: порог сигнала водителям
+# ---------------------------------------------------------------------------
+
+
+def test_fit_threshold_brings_030_to_015() -> None:
+    """Сценарий «Порог выводит долю к цели»: 0.30 при 0.5 → 0.15 ± 1 п.п.
+
+    Распределение: 700 пар с вероятностью 0.2 и 300 равномерно в [0.5, 1.0] —
+    при пороге 0.5 срабатывает ровно 30 %; цель 0.15 достижима сдвигом порога
+    вверх (шаг доли 0.001 ≪ допуска).
+    """
+
+    probs = np.concatenate([np.full(700, 0.2), np.linspace(0.5, 1.0, 300)])
+    assert threshold_fire_fraction(probs, 0.5) == pytest.approx(0.30)
+
+    fit = fit_threshold(probs, 0.15)
+
+    assert fit.target_reached is True
+    assert fit.threshold > 0.5
+    assert abs(fit.fire_rate - 0.15) <= TOLERANCE
+    assert fit.fire_rate != pytest.approx(0.30)
+
+
+def test_fit_threshold_degenerate_reports_not_reached() -> None:
+    """Вырожденное распределение (все p равны) — признак недостижения без исключений."""
+
+    fit = fit_threshold(np.full(10, 0.7), 0.15)
+
+    assert fit.target_reached is False
+    assert 0.0 <= fit.threshold <= 1.0
+
+
+@pytest.fixture
+def planning_artifacts_root(pattern_db: Path, tmp_path: Path) -> Path:
+    """Корень артефактов планирования с каталогами обоих семейств (мини-эпоха)."""
+
+    root = tmp_path / "planning-artifacts"
+    root.mkdir()
+    ml_cfg = _ml_cfg()
+    data = prepare_planning_data(pattern_db, ml_cfg, zones=list(CITY_ZONES), start=SIM_START)
+    for arch in ("mlp", "lstm"):
+        result = train_planning(arch, data, ml_cfg)
+        out = root / f"{arch}-v1-2026-01-01"
+        save_planning_artifacts(
+            out,
+            model_version=out.name,
+            family=arch,
+            model=result.model,
+            data=data,
+            result=result,
+            ml_cfg=ml_cfg,
+        )
+    return root
+
+
+def test_calibrate_signal_writes_json(
+    pattern_db: Path, planning_artifacts_root: Path, tmp_path: Path
+) -> None:
+    """json создан: пороги, доли, цель, допуск, окно, горизонт, каталоги (спека)."""
+
+    cfg = AppConfig(ml=_ml_cfg())
+    json_root = tmp_path / "artifacts"
+
+    payload, json_path = calibrate_signal(
+        cfg,
+        db_path=pattern_db,
+        planning_artifacts_root=planning_artifacts_root,
+        artifacts_root=json_root,
+    )
+
+    assert json_path == json_root / "signal-calibration.json"
+    assert json_path.is_file()
+    assert json.loads(json_path.read_text(encoding="utf-8")) == payload
+    assert payload["target_fire_rate"] == pytest.approx(0.15)
+    assert payload["tolerance"] == pytest.approx(TOLERANCE)
+    assert payload["horizon_min"] == cfg.policy.signal.horizon_min == 60
+    assert payload["window_days"] == {"first_day": 2, "last_day": 2}
+    assert set(payload["threshold"]) == {"mlp", "lstm"}
+    for family in ("mlp", "lstm"):
+        entry = payload["families"][family]
+        assert 0.0 <= entry["threshold"] <= 1.0
+        assert entry["artifact_dir"] == f"{family}-v1-2026-01-01"
+        # Факт достижения согласован с записанной долей и целью.
+        assert entry["target_reached"] == (
+            abs(entry["fire_rate"] - payload["target_fire_rate"]) <= TOLERANCE
+        )
+        assert payload["threshold"][family] == entry["threshold"]
+
+
+def test_calibrate_signal_is_deterministic(
+    pattern_db: Path, planning_artifacts_root: Path, tmp_path: Path
+) -> None:
+    """Повторный вызов даёт побайтово тот же json."""
+
+    cfg = AppConfig(ml=_ml_cfg())
+    json_root = tmp_path / "artifacts"
+    calibrate_signal(
+        cfg,
+        db_path=pattern_db,
+        planning_artifacts_root=planning_artifacts_root,
+        artifacts_root=json_root,
+    )
+    first = (json_root / "signal-calibration.json").read_bytes()
+
+    calibrate_signal(
+        cfg,
+        db_path=pattern_db,
+        planning_artifacts_root=planning_artifacts_root,
+        artifacts_root=json_root,
+    )
+    second = (json_root / "signal-calibration.json").read_bytes()
+
+    assert first == second
+
+
+def test_calibrate_signal_missing_artifact_guard(pattern_db: Path, tmp_path: Path) -> None:
+    """Нет каталога семейства планирования — FileNotFoundError до записи, json не создан."""
+
+    root = tmp_path / "planning-artifacts"
+    root.mkdir()  # пусто: ни mlp, ни lstm
+    json_root = tmp_path / "artifacts"
+
+    cfg = AppConfig(ml=_ml_cfg())
+    with pytest.raises(FileNotFoundError, match="mlp"):
+        calibrate_signal(
+            cfg,
+            db_path=pattern_db,
+            planning_artifacts_root=root,
+            artifacts_root=json_root,
+        )
+    assert not (json_root / "signal-calibration.json").exists()
+
+
+def test_update_config_threshold_touches_only_threshold_line(tmp_path: Path) -> None:
+    """Правка меняет ровно строку ``threshold:``; round-trip даёт пороги из json."""
+
+    config_path = tmp_path / "config.yaml"
+    shutil.copy(REFERENCE_CONFIG, config_path)
+    before = config_path.read_text(encoding="utf-8").splitlines()
+    new_thresholds = {"mlp": 0.123, "lstm": 0.456}
+
+    update_config_threshold(config_path, new_thresholds)
+
+    after = config_path.read_text(encoding="utf-8").splitlines()
+    assert len(after) == len(before)
+    changed = [i for i, (old, new) in enumerate(zip(before, after)) if old != new]
+    assert changed == [
+        before.index(next(line for line in before if line.lstrip().startswith("threshold:")))
+    ]
+    assert "threshold: {mlp: 0.123, lstm: 0.456}" in after[changed[0]]
+    assert "# порог вероятности вреда по семействам" in after[changed[0]]
+
+    loaded = load_config(config_path)
+    assert loaded.policy.signal.threshold["mlp"] == pytest.approx(new_thresholds["mlp"])
+    assert loaded.policy.signal.threshold["lstm"] == pytest.approx(new_thresholds["lstm"])
+
+
+def test_update_config_threshold_missing_line_no_write(tmp_path: Path) -> None:
+    """Конфиг без строки ``threshold:`` — исключение, файл не тронут."""
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("policy:\n  target_fire_rate: 0.15\n", encoding="utf-8")
+    original = config_path.read_bytes()
+
+    with pytest.raises(ValueError, match="threshold"):
+        update_config_threshold(config_path, {"mlp": 0.5, "lstm": 0.5})
+
+    assert config_path.read_bytes() == original
+
+
+def test_cli_signal_calibrates(
+    pattern_db: Path,
+    planning_artifacts_root: Path,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """CLI ``--signal``: exit 0, json и порог конфига обновлены, печать порогов."""
+
+    config_path = tmp_path / "config.yaml"
+    shutil.copy(REFERENCE_CONFIG, config_path)
+    json_root = tmp_path / "artifacts"
+    args = [
+        "--signal",
+        "--config",
+        str(config_path),
+        "--db",
+        str(pattern_db),
+        "--artifacts-root",
+        str(json_root),
+        "--planning-artifacts-root",
+        str(planning_artifacts_root),
+    ]
+
+    rc = main(args)
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "family=mlp threshold=" in captured.out
+    assert "family=lstm threshold=" in captured.out
+
+    payload = json.loads((json_root / "signal-calibration.json").read_text(encoding="utf-8"))
+    loaded = load_config(config_path)
+    assert loaded.policy.signal.threshold["mlp"] == pytest.approx(payload["threshold"]["mlp"])
+    assert loaded.policy.signal.threshold["lstm"] == pytest.approx(payload["threshold"]["lstm"])
+
+    first = (json_root / "signal-calibration.json").read_bytes()
+    assert main(args) == 0
+    assert (json_root / "signal-calibration.json").read_bytes() == first  # детерминизм
+
+
+def test_cli_signal_missing_artifacts_exit_2(pattern_db: Path, tmp_path: Path, capsys) -> None:
+    """Нет артефактов планирования: exit 2, json не создан, конфиг не тронут."""
+
+    config_path = tmp_path / "config.yaml"
+    shutil.copy(REFERENCE_CONFIG, config_path)
+    original = config_path.read_bytes()
+    empty_root = tmp_path / "empty-planning"
+    empty_root.mkdir()
+    json_root = tmp_path / "artifacts"
+
+    rc = main(
+        [
+            "--signal",
+            "--config",
+            str(config_path),
+            "--db",
+            str(pattern_db),
+            "--artifacts-root",
+            str(json_root),
+            "--planning-artifacts-root",
+            str(empty_root),
+        ]
+    )
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.err.strip() != ""
+    assert not (json_root / "signal-calibration.json").exists()
+    assert config_path.read_bytes() == original
+
+
+def test_planning_signal_contour_horizon_outside_snapshot(
+    pattern_db: Path, planning_artifacts_root: Path
+) -> None:
+    """Горизонт сигнала вне снимка артефакта — ошибка до прогона (спека)."""
+
+    cfg = AppConfig.model_validate({"policy": {"signal": {"horizon_min": 30}}})
+    with pytest.raises(ValueError, match="horizon_min=30"):
+        PlanningSignalContour(
+            cfg,
+            LiveRowSource(),
+            family="mlp",
+            artifacts_root=planning_artifacts_root,
+        )

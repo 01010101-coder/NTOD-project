@@ -591,13 +591,71 @@ def _default_stairs() -> list[PolicyStairCfg]:
     return [PolicyStairCfg(**row) for row in _DEFAULT_STAIR_ROWS]
 
 
+class SignalCfg(_CfgBase):
+    """Сигнал водителям в секции ``policy`` (change ``policy-driver-signal``).
+
+    ``horizon_min`` — горизонт сети планирования, на котором контур сигнала
+    читает вероятность вреда (кратен 5, > 0); ``mult`` — единственная ступень
+    сигнала (> 1.0); ``target_fire_rate`` — цель калибровки порога в (0, 1);
+    ``threshold`` — порог вероятности по семействам сетей планирования, каждый
+    в [0, 1]. Конфиг без подсекции грузится с дефолтами.
+    """
+
+    horizon_min: int = 60
+    mult: float = 1.30
+    target_fire_rate: float = 0.15
+    threshold: dict[str, float] = Field(default_factory=lambda: {"mlp": 0.5, "lstm": 0.5})
+
+    @field_validator("horizon_min")
+    @classmethod
+    def _check_horizon(cls, value: int) -> int:
+        """Горизонт сигнала: положительный и кратный шагу агрегации 5 минут."""
+
+        if value <= 0 or value % 5 != 0:
+            raise ValueError(f"horizon_min обязан быть кратен 5 и больше 0, получено {value}")
+        return value
+
+    @field_validator("mult")
+    @classmethod
+    def _check_mult(cls, value: float) -> float:
+        """Сигнал водителям не может снижать тариф: множитель строго выше 1.0."""
+
+        if value <= 1.0:
+            raise ValueError(f"mult обязан быть > 1.0, получено {value}")
+        return value
+
+    @field_validator("target_fire_rate")
+    @classmethod
+    def _check_target(cls, value: float) -> float:
+        """Цель доли срабатываний лежит в открытом интервале (0, 1)."""
+
+        if not 0.0 < value < 1.0:
+            raise ValueError(f"target_fire_rate должен быть в интервале (0, 1), получено {value}")
+        return value
+
+    @field_validator("threshold")
+    @classmethod
+    def _check_threshold(cls, value: dict[str, float]) -> dict[str, float]:
+        """Каждый порог семейства лежит в отрезке [0, 1]."""
+
+        for family, threshold in value.items():
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(
+                    f"порог семейства {family!r} должен лежать в [0, 1], получено {threshold}"
+                )
+        return value
+
+
 class PolicyCfg(_CfgBase):
-    """Политика цены (change ``m6-policy``): ступени по прогнозу дефицита.
+    """Политика (changes ``m6-policy``, ``policy-driver-signal``): цена и сигнал.
 
     Дефолты — приложение А плана M5+M6: ``stairs`` записаны по убыванию
     ``p_min`` (порядок списка на выбор ступени не влияет), ``shift`` —
     δ-сдвиги эффективной вероятности по семействам моделей, ``worlds_dir`` —
     каталог миров веточного генератора (потребитель — change ``m6-worlds``).
+    ``channel`` — рычаг политики: ``price`` (дефолт, как до change'а
+    ``policy-driver-signal``), ``heatmap`` (политика ставит только сигнал
+    водителям) и ``both`` (цена и сигнал); ``signal`` — параметры сигнала.
     """
 
     horizon_min: int = 15
@@ -607,6 +665,8 @@ class PolicyCfg(_CfgBase):
     shift: dict[str, float] = Field(default_factory=lambda: dict(_DEFAULT_SHIFT))
     target_fire_rate: float = 0.10
     worlds_dir: str = "data/worlds"
+    channel: Literal["price", "heatmap", "both"] = "price"
+    signal: SignalCfg = Field(default_factory=SignalCfg)
 
     @field_validator("stairs")
     @classmethod

@@ -150,3 +150,9 @@ policy:                         # ценовые политики (change m6-pol
   shift: {mlp: -0.453, lstm: -0.438}  # δ-калибровка частоты срабатываний
   target_fire_rate: 0.10        # цель: ступень активна в ~10 % зон-моментов
   worlds_dir: data/worlds       # реестр: a-base, b-reactive, c-mlp, d-lstm
+  channel: price                # рычаг политики (change policy-driver-signal): price | heatmap | both
+  signal:                       # сигнал водителям (change policy-driver-signal)
+    horizon_min: 60             # горизонт сети планирования, минут (кратен 5, > 0)
+    mult: 1.30                  # единственная ступень сигнала (> 1.0)
+    target_fire_rate: 0.15      # цель калибровки порога: доля срабатываний (0, 1)
+    threshold: {mlp: 0.5, lstm: 0.5}  # порог вероятности вреда по семействам, [0, 1]

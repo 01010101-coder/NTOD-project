@@ -29,6 +29,15 @@ simulator → ml — решение 1 design.md: ml-слой M3 не знает 
 (день ``ml.train_days + 1``) тариф мира возвращается без изменений,
 диагностика срабатываний копится в памяти. Сетевой прогнозист
 :class:`NetworkPredictor` восстанавливает сеть из артефакта M3 без ретрейна.
+
+Контуры сигнала водителям (change ``policy-driver-signal``, спека
+simulator-policy): :class:`ReactiveSignalContour` — то же правило факта, что
+у :class:`ReactiveContour`, но с множителем ``policy.signal.mult``;
+:class:`PlanningSignalContour` — порог вероятности вреда сети семейства на
+горизонте ``policy.signal.horizon_min``. Оба — подклассы
+:class:`PolicyContour`: их ``price`` подключается к шву ``driver_signal_fn``,
+а кэш на бакет, окно активации, композиция с тарифом мира и диагностика
+общие с контурами цены.
 """
 
 from bisect import bisect_right
@@ -52,6 +61,7 @@ from ml.dataset import (
     world_start,
 )
 from ml.infer import latest_artifact_dir, load_model_artifact, predict_windows
+from ml.planning import PlanningPredictor
 from ml.train import ARTIFACTS_ROOT
 from simulator.live import MinuteRecord
 
@@ -61,9 +71,11 @@ if TYPE_CHECKING:
 __all__ = [
     "LiveRowSource",
     "NetworkPredictor",
+    "PlanningSignalContour",
     "PolicyContour",
     "Predictor",
     "ReactiveContour",
+    "ReactiveSignalContour",
     "ShadowForecaster",
     "compose_tariff",
     "has_deficit",
@@ -496,6 +508,95 @@ class ReactiveContour(PolicyContour):
             }
         )
         return reactive_multiplier(row, self._reactive_mult)
+
+
+class ReactiveSignalContour(PolicyContour):
+    """Контур реактивного сигнала водителям (ветка B в канале ``heatmap``/``both``).
+
+    Правило то же, что у :class:`ReactiveContour` — дефицит последнего закрытого
+    бакета зоны по правилу контракта (:func:`reactive_multiplier`), — но
+    множитель берётся из ``policy.signal.mult`` (change
+    ``policy-driver-signal``). ``price`` контура подключается к шву сигнала
+    движка ``driver_signal_fn``, а не к цене пассажира; кэш на бакет, окно
+    активации, композиция ``min(тариф_мира × mult, total_cap)`` и диагностика
+    срабатываний — общие с :class:`PolicyContour`.
+    """
+
+    def __init__(self, cfg: AppConfig, source: LiveRowSource) -> None:
+        """Собрать контур без прогнозиста: правило читает метрики источника."""
+
+        super().__init__(cfg, None, source)
+        self._reactive_mult = cfg.policy.signal.mult
+
+    def _multiplier(self, zone_id: int, ts: datetime) -> float:
+        """Множитель сигнала по метрикам последнего закрытого бакета зоны."""
+
+        point = self._source.metrics_at(zone_id, ts)
+        row = (
+            None
+            if point is None
+            else {
+                "requests": point.requests,
+                "free_drivers": point.free_drivers,
+                "unfulfilled": point.unfulfilled,
+            }
+        )
+        return reactive_multiplier(row, self._reactive_mult)
+
+
+class PlanningSignalContour(PolicyContour):
+    """Контур сигнала по прогнозу планирования (ветки C/D в ``heatmap``/``both``).
+
+    Множитель — одна ступень ``policy.signal.mult``, если вероятность вреда
+    сети семейства ``family`` на горизонте ``policy.signal.horizon_min`` по
+    последнему закрытому бакету не ниже ``policy.signal.threshold[family]``,
+    иначе 1.00 (change ``policy-driver-signal``, спека simulator-policy).
+    Прогнозист — :class:`ml.planning.PlanningPredictor`; его построение до
+    старта прогона поднимает ``FileNotFoundError`` без каталога артефакта
+    семейства и ``ValueError`` при горизонте вне снимка артефакта (guard до
+    прогона). Неполное окно (прогрев) даёт 1.00. Кэш на бакет, окно активации,
+    композиция с тарифом мира и диагностика — общие с :class:`PolicyContour`.
+    """
+
+    def __init__(
+        self,
+        cfg: AppConfig,
+        source: LiveRowSource,
+        *,
+        family: str,
+        artifacts_root: str | Path | None = None,
+    ) -> None:
+        """Поднять сеть семейства ``family`` и запомнить порог его сигнала.
+
+        ``artifacts_root=None`` — корень ``ml.planning.artifacts_root`` конфига
+        (как у CLI планирования); явный корень нужен тестам и ноутбукам.
+        """
+
+        predictor = PlanningPredictor(
+            source,
+            cfg,
+            family=family,
+            horizon_min=cfg.policy.signal.horizon_min,
+            artifacts_root=artifacts_root,
+        )
+        super().__init__(cfg, predictor, source)
+        thresholds = cfg.policy.signal.threshold
+        if family not in thresholds:
+            raise ValueError(
+                f"policy.signal.threshold не содержит порога семейства {family!r}:"
+                f" заданы {sorted(thresholds)}"
+            )
+        self._family = family
+        self._threshold = thresholds[family]
+        self._signal_mult = cfg.policy.signal.mult
+
+    def _multiplier(self, zone_id: int, ts: datetime) -> float:
+        """Множитель сигнала: вероятность вреда не ниже порога семейства."""
+
+        p = self._predictor.predict(zone_id, ts)
+        if p is None:
+            return 1.0
+        return self._signal_mult if p >= self._threshold else 1.0
 
 
 class ShadowForecaster:

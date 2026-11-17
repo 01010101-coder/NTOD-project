@@ -38,7 +38,7 @@ import pytest
 
 from common.config import AppConfig, MlCfg, PolicyCfg, load_config
 from common.timeutil import add_minutes, from_iso, to_iso
-from ml.dataset import SqliteRowSource, bucket_index, build_window, from_bucket_index
+from ml.dataset import SqliteRowSource, bucket_index, build_window, from_bucket_index, world_start
 from ml.train import model_version_for, prepare_training_data, save_model_artifacts, train_model
 from simulator.__main__ import SqliteTripWriter
 from simulator.engine import Engine
@@ -47,7 +47,9 @@ from simulator.live import AssignEvent, MinuteRecord
 from simulator.policy import (
     LiveRowSource,
     NetworkPredictor,
+    PlanningSignalContour,
     PolicyContour,
+    ReactiveSignalContour,
     compose_tariff,
     has_deficit,
     model_shift,
@@ -856,3 +858,106 @@ def test_activation_prefix_equals_a_base(tmp_path: Path) -> None:
     prefix_trips_b = [row for row in trips_b if row[1] < boundary_iso]
     assert prefix_trips_a and prefix_trips_a == prefix_trips_b
     assert trips_a != trips_b
+
+
+# --- Группа 5: контуры сигнала водителям (change policy-driver-signal) ------
+
+
+def _signal_config() -> AppConfig:
+    """Мир контуров сигнала: 6 зон эталона, спавн и инъекции выключены.
+
+    Тариф мира равен 1.0 во всех зонах и минутах — значения сигнала совпадают
+    с множителем контура, как в сценариях спеки.
+    """
+
+    return AppConfig.model_validate(
+        {
+            "seed": 7,
+            "population": {"scale": 0.0},
+            "drivers": {"count": 4, "wait_limit_min": 6},
+            "weather": {
+                "rain_day_chance": 0.0,
+                "episode_start_h": [0, 0],
+                "episode_duration_h": [1, 1],
+            },
+            "pricing": {"surge_injection": {"day_chance": 0.0}},
+            "ml": {"train_days": 0},
+        }
+    )
+
+
+def _closed_bucket(cfg: AppConfig) -> datetime:
+    """Первый бакет мира — последний закрытый бакет для момента второго бакета."""
+
+    return world_start(cfg)
+
+
+def test_reactive_signal_by_deficit() -> None:
+    """Сценарий «Реактивный сигнал по факту дефицита»: зона 3 → 1.30, зона 4 → 1.0."""
+
+    cfg = _signal_config()
+    source = LiveRowSource()
+    contour = ReactiveSignalContour(cfg, source)
+    contour.bind(Engine(cfg))
+    closed = _closed_bucket(cfg)
+    source.on_metrics_row(_row(ts=closed, zone_id=3, requests=10, free_drivers=1))
+    source.on_metrics_row(_row(ts=closed, zone_id=4, requests=10, free_drivers=5))
+
+    t = add_minutes(world_start(cfg), 7)
+    assert contour.price(3, t) == pytest.approx(1.30)
+    assert contour.price(4, t) == pytest.approx(1.0)
+    assert contour.fire_slots == 2
+    assert contour.fire_count == 1
+    assert contour.fire_rate == pytest.approx(0.5)
+
+
+def test_planning_signal_by_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Сценарий «Сигнал планирования по порогу»: 0.62 → 1.30, 0.40 → 1.0.
+
+    Стаб-прогнозист подменяет сетевой: порог ``policy.signal.threshold`` и
+    диагностика срабатываний — математика контура, а не артефакта.
+    """
+
+    import simulator.policy as policy_module
+
+    stub = StubPredictor({1: 0.62, 2: 0.40})
+    monkeypatch.setattr(policy_module, "PlanningPredictor", lambda *args, **kwargs: stub)
+    cfg = _signal_config()
+    assert cfg.policy.signal.threshold["mlp"] == 0.5
+    contour = PlanningSignalContour(cfg, LiveRowSource(), family="mlp")
+    contour.bind(Engine(cfg))
+
+    t = add_minutes(world_start(cfg), 7)
+    assert contour.price(1, t) == pytest.approx(1.30)
+    assert contour.price(2, t) == pytest.approx(1.0)
+    assert contour.fire_slots == 2
+    assert contour.fire_count == 1
+    assert contour.fire_rate == pytest.approx(0.5)
+
+
+def test_signal_before_activation_returns_world_tariff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Сценарий «До активации сигнал равен тарифу мира»: кэш и счётчики не растут."""
+
+    import simulator.policy as policy_module
+
+    stub = StubPredictor({0: 0.90})
+    monkeypatch.setattr(policy_module, "PlanningPredictor", lambda *args, **kwargs: stub)
+    cfg = _signal_config()
+    cfg = cfg.model_copy(update={"ml": cfg.ml.model_copy(update={"train_days": 1})})
+    contour = PlanningSignalContour(cfg, LiveRowSource(), family="mlp")
+    contour.bind(Engine(cfg))
+
+    t = add_minutes(world_start(cfg), 7)  # день 1 — до границы активации
+    assert contour.price(0, t) == 1.0
+    assert contour.fire_slots == 0
+    assert contour.fire_count == 0
+    assert not stub.calls
+
+
+def test_planning_signal_contour_missing_artifact(tmp_path: Path) -> None:
+    """Построение без каталога артефакта семейства — ошибка до прогона (спека)."""
+
+    with pytest.raises(FileNotFoundError, match="mlp"):
+        PlanningSignalContour(
+            _signal_config(), LiveRowSource(), family="mlp", artifacts_root=tmp_path
+        )

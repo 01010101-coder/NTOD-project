@@ -10,6 +10,7 @@
 среды тесты не читают.
 """
 
+import json
 import os
 import re
 import sqlite3
@@ -18,11 +19,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
-from common.config import AppConfig, load_config
+from common.config import AppConfig, PlanningCfg, load_config
 from simulator.branches import BRANCHES, generate_branch
 from simulator.engine import Engine
 from storage.csv_export import export_table
+from storage.schema import init_db
 
 REFERENCE_CONFIG = Path(__file__).resolve().parents[1] / "config.yaml"
 SEED = 42
@@ -503,3 +506,255 @@ def test_branch_cli_c_mlp_missing_artifacts(tmp_path):
     )
     assert result.returncode == 2
     assert "mlp" in result.stderr
+
+
+# --- change policy-driver-signal: канал, сигнал и метаданные ветки -----------
+
+
+def _heatmap_world_config(*, train_days: int = 1, test_days: int = 1) -> AppConfig:
+    """Мир канала сигнала: 2 зоны, вызов подработчиков, цены мира без инъекций."""
+
+    return AppConfig.model_validate(
+        {
+            "seed": 7,
+            "city": {
+                "zones": [
+                    {
+                        "id": 0,
+                        "name": "a",
+                        "archetype": "residential",
+                        "attract_origin": 1.0,
+                        "attract_dest": 1.0,
+                        "map": {"x": 0.0, "y": 0.0},
+                    },
+                    {
+                        "id": 1,
+                        "name": "b",
+                        "archetype": "business",
+                        "attract_origin": 1.0,
+                        "attract_dest": 1.0,
+                        "map": {"x": 10.0, "y": 0.0},
+                    },
+                ],
+                "roads": [{"from_zone": 0, "to_zone": 1, "minutes": 30.0}],
+            },
+            "population": {"scale": 50.0},
+            "drivers": {
+                "count": 4,
+                "wait_limit_min": 6,
+                "callout": {
+                    "enabled": True,
+                    "part": 20,
+                    "lag_min": 5,
+                    "session_min": 60,
+                    "every_min": 5,
+                },
+            },
+            "weather": {
+                "rain_day_chance": 0.0,
+                "episode_start_h": [0, 0],
+                "episode_duration_h": [1, 1],
+            },
+            "pricing": {"surge_injection": {"day_chance": 0.0}},
+            "ml": {"train_days": train_days, "test_days": test_days},
+            "policy": {"channel": "heatmap"},
+        }
+    )
+
+
+def _meta(db: Path) -> dict:
+    """Метаданные ветки рядом с БД."""
+
+    return json.loads(db.parent.joinpath(f"{db.stem}.meta.json").read_text(encoding="utf-8"))
+
+
+def test_generate_branch_a_base_meta(tmp_path):
+    """Сценарий «Метаданные ветки a-base»: канал, null-доли, нули вызова."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    db = tmp_path / "a-base.db"
+    assert generate_branch("a-base", cfg, seed=SEED, days=1, db_path=str(db), shadow=False)
+
+    meta = _meta(db)
+    assert meta["branch"] == "a-base"
+    assert meta["channel"] == "price"
+    assert meta["seed"] == SEED
+    assert meta["days"] == 1
+    assert meta["price_fire_rate"] is None
+    assert meta["signal_fire_rate"] is None
+    assert meta["callouts_test"] == 0
+    assert meta["callout_minutes_test"] == 0
+
+
+def test_heatmap_channel_keeps_passenger_price(tmp_path):
+    """Сценарий «Канал heatmap не меняет цену пассажиру»: сигнал вместо цены."""
+
+    cfg = _heatmap_world_config()
+    db = tmp_path / "b-reactive.db"
+    summary = generate_branch("b-reactive", cfg, seed=SEED, days=2, db_path=str(db), shadow=False)
+    assert summary is not None
+
+    conn = sqlite3.connect(db)
+    try:
+        trip_mults = {row[0] for row in conn.execute("SELECT price_multiplier FROM trips")}
+        metric_mults = {
+            row[0] for row in conn.execute("SELECT price_multiplier FROM zone_metrics_5min")
+        }
+    finally:
+        conn.close()
+    assert trip_mults == {1.0}  # цена пассажиру — тариф мира
+    assert metric_mults == {1.0}
+
+    meta = _meta(db)
+    assert meta["channel"] == "heatmap"
+    assert meta["price_fire_rate"] is None
+    assert meta["signal_fire_rate"] > 0  # сигнал действительно срабатывал
+    assert meta["callouts_test"] > 0  # вызов подработчиков сработал по сигналу
+
+
+def test_heatmap_channel_requires_planning_artifact(tmp_path):
+    """Сценарий «Канал heatmap требует артефакт планирования»: ошибка до прогона."""
+
+    cfg = _heatmap_world_config().model_copy(
+        update={
+            "ml": _heatmap_world_config().ml.model_copy(
+                update={"planning": PlanningCfg(artifacts_root=str(tmp_path / "no-planning"))}
+            )
+        }
+    )
+    db = tmp_path / "c-mlp.db"
+    with pytest.raises(FileNotFoundError, match="mlp"):
+        generate_branch("c-mlp", cfg, seed=SEED, days=2, db_path=str(db), shadow=False)
+
+    conn = sqlite3.connect(db)  # БД создана guard'ом, но строк не получила
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM zone_metrics_5min").fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert not (tmp_path / "c-mlp.meta.json").exists()  # метаданные не созданы
+
+
+def test_heatmap_cli_missing_planning_artifacts(tmp_path):
+    """CLI канала heatmap без артефактов планирования: exit 2, БД и мета пусты."""
+
+    config = {
+        "seed": 7,
+        "population": {"scale": 0.0},
+        "weather": {"rain_day_chance": 0.0},
+        "pricing": {"surge_injection": {"day_chance": 0.0}},
+        "ml": {"planning": {"artifacts_root": str(tmp_path / "no-planning")}},
+        "policy": {"channel": "heatmap"},
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    db = tmp_path / "c.db"
+    env = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT)}
+    result = subprocess.run(
+        [
+            str(PYTHON),
+            "-m",
+            "simulator.branches",
+            "--branch",
+            "c-mlp",
+            "--config",
+            str(config_path),
+            "--db",
+            str(db),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert result.returncode == 2
+    assert "mlp" in result.stderr
+    assert not (tmp_path / "c.meta.json").exists()
+
+
+def test_callout_minutes_inside_test_window(tmp_path):
+    """Сценарий «Часы подработчиков в окне»: минуты = сумма ``part_online`` окна.
+
+    Короткая ветка ``b-reactive`` в канале ``heatmap`` воспроизводится прямым
+    прогоном движка с тем же контуром сигнала: сумма ``part_online`` по минутам
+    тест-недели равна ``callout_minutes_test``, а доля срабатываний — диагностике
+    контура.
+    """
+
+    from common.timeutil import add_minutes
+    from ml.dataset import world_start
+    from simulator.policy import LiveRowSource, ReactiveSignalContour
+
+    cfg = _heatmap_world_config(train_days=0, test_days=1)
+    db = tmp_path / "b-reactive.db"
+    summary = generate_branch("b-reactive", cfg, seed=SEED, days=1, db_path=str(db), shadow=False)
+    assert summary is not None
+    assert summary.callouts > 0
+
+    contour = ReactiveSignalContour(cfg, LiveRowSource(agg_step_min=cfg.engine.agg_step_min))
+    engine = Engine(cfg, seed=SEED, driver_signal_fn=contour.price)
+    contour.bind(engine)
+    start = world_start(cfg)
+    end = add_minutes(start, cfg.ml.test_days * 1440)
+    part_online: list[int] = []
+
+    def observe(record) -> None:
+        contour.on_minute(record)  # расписание высадок истории контура
+        part_online.append(record.part_online if start <= record.t < end else 0)
+
+    engine.run(1, _StubWriter(), on_minute=observe, on_metrics_row=contour.on_metrics_row)
+
+    meta = _meta(db)
+    assert meta["callout_minutes_test"] == sum(part_online) > 0
+    assert meta["callouts_test"] > 0
+    assert meta["signal_fire_rate"] == pytest.approx(contour.fire_rate)
+
+
+def test_guard_does_not_write_meta(tmp_path):
+    """Неуспешный прогон (guard непустой trips) метаданных не создаёт."""
+
+    cfg = _heatmap_world_config()
+    db = tmp_path / "b-reactive.db"
+    conn = sqlite3.connect(db)
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO trips (created_at, origin_zone, dest_zone, status, price_multiplier)"
+        " VALUES ('2026-11-02 00:00:00', 0, 1, 'completed', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    assert (
+        generate_branch("b-reactive", cfg, seed=SEED, days=1, db_path=str(db), shadow=False) is None
+    )
+    assert not (tmp_path / "b-reactive.meta.json").exists()
+
+
+def test_test_window_cost_observer_counts_window_only():
+    """Наблюдатель минут: минуты окна, выходы по приростам, вне окна — ноль."""
+
+    from common.timeutil import add_minutes
+    from ml.dataset import world_start
+    from simulator.branches import _TestWindowCostObserver
+    from simulator.live import MinuteRecord
+
+    cfg = _heatmap_world_config(train_days=0, test_days=1)
+    observer = _TestWindowCostObserver(cfg)
+    start = world_start(cfg)
+    part = [0, 0, 3, 3, 1, 0, 0]
+    for minute, online in enumerate(part):
+        observer.on_minute(
+            MinuteRecord(
+                t=add_minutes(start, minute),
+                is_rain=False,
+                price_mult=(1.0, 1.0),
+                free_by_zone=(0, 0),
+                spawns=(),
+                assignments=(),
+                dropoffs=(),
+                expiries=(),
+                part_online=online,
+            )
+        )
+    assert observer.minutes == sum(part)
+    assert observer.callouts == 3  # один выход трёх подработчиков (0→3)

@@ -28,6 +28,7 @@ from common.config import (
     RepositionCfg,
     ShiftsCfg,
     ShocksCfg,
+    SignalCfg,
     StorageCfg,
     load_config,
 )
@@ -712,3 +713,77 @@ def test_callout_unknown_key_rejected() -> None:
 
     with pytest.raises(ValidationError, match=r"drivers\.callout\.bonus_rub"):
         AppConfig.model_validate({"drivers": {"callout": {"bonus_rub": 100.0}}})
+
+
+# --- Канал и сигнал водителям (change policy-driver-signal) ------------------
+
+
+def test_policy_channel_and_signal_defaults(tmp_path: Path) -> None:
+    """Дефолты канала и сигнала: конфиг без ключей грузится (сценарий спеки)."""
+
+    assert AppConfig().policy.channel == "price"
+    assert AppConfig().policy.signal == SignalCfg(
+        horizon_min=60,
+        mult=1.30,
+        target_fire_rate=0.15,
+        threshold={"mlp": 0.5, "lstm": 0.5},
+    )
+
+    path = tmp_path / "config.yaml"
+    path.write_text("policy:\n  horizon_min: 15\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.policy.channel == "price"
+    assert cfg.policy.signal.horizon_min == 60
+    assert cfg.policy.signal.mult == 1.30
+    assert cfg.policy.signal.target_fire_rate == 0.15
+    assert cfg.policy.signal.threshold == {"mlp": 0.5, "lstm": 0.5}
+
+
+def test_policy_channel_unknown_rejected() -> None:
+    """Неизвестный канал отклоняется с путём ``policy.channel`` (сценарий спеки)."""
+
+    with pytest.raises(ValidationError, match=r"policy\.channel"):
+        AppConfig.model_validate({"policy": {"channel": "radio"}})
+
+
+@pytest.mark.parametrize("channel", ["price", "heatmap", "both"])
+def test_policy_channel_accepted(channel: str) -> None:
+    """Три канала спеки принимаются; значение доходит до модели."""
+
+    assert AppConfig.model_validate({"policy": {"channel": channel}}).policy.channel == channel
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"horizon_min": 0},
+        {"horizon_min": 62},
+        {"mult": 1.0},
+        {"mult": 0.9},
+        {"target_fire_rate": 0.0},
+        {"target_fire_rate": 1.0},
+        {"threshold": {"mlp": 1.2}},
+        {"threshold": {"lstm": -0.1}},
+    ],
+)
+def test_policy_signal_invalid_values_rejected(payload: dict) -> None:
+    """Значения вне ограничений спеки отклоняются с путём до ключа."""
+
+    key = next(iter(payload))
+    with pytest.raises(ValidationError, match=rf"policy\.signal\.{key}"):
+        AppConfig.model_validate({"policy": {"signal": payload}})
+
+
+def test_policy_signal_unknown_key_rejected() -> None:
+    """Неизвестный ключ ``policy.signal`` отклоняется с путём до ключа (спека)."""
+
+    with pytest.raises(ValidationError, match=r"policy\.signal\.clickbait"):
+        AppConfig.model_validate({"policy": {"signal": {"clickbait": 0.5}}})
+
+
+def test_policy_channel_and_signal_reference_config_equals_defaults() -> None:
+    """Эталонный ``config.yaml``: ``channel: price`` и сигнал, равный дефолтам."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    assert cfg.policy.channel == "price"
+    assert cfg.policy.signal == SignalCfg()
