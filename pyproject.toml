@@ -42,7 +42,7 @@ line-length = 100
 # прогона m2-city: иначе цитаты приложения Б роняют make lint).
 # Ноутбуки (notebooks/) — исследовательские артефакты разведки M3, не пакет
 # проекта: их стиль не входит в ворота make lint (прецедент *.md).
-extend-exclude = [".opencode", "*.md", "*.ipynb"]
+extend-exclude = [".opencode", "*.md", "*.ipynb", "notebooks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
