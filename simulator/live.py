@@ -102,6 +102,9 @@ class MinuteRecord:
     ``online_drivers`` — число водителей на смене (в любом состоянии, кроме
     ``offline``, включая помеченных к уходу) на конец минуты (change
     ``world-driver-shifts``); поле тоже добавлено последним с дефолтом.
+    ``part_online`` — число подработчиков на линии на конец минуты (change
+    ``world-elastic-supply``); поле добавлено последним с дефолтом 0, при
+    выключенном вызове оно равно 0.
     """
 
     t: datetime
@@ -114,3 +117,4 @@ class MinuteRecord:
     expiries: tuple[ExpiryEvent, ...]
     cancellations: tuple[CancelEvent, ...] = ()
     online_drivers: int = 0
+    part_online: int = 0

@@ -269,3 +269,13 @@ def test_background_fill_and_determinism():
     summary_sync = fill_sync(log_sync, cfg, days)
     assert log_sync.metrics_rows() == log_a.metrics_rows()
     assert summary_sync.completed == run_a.summary.completed
+
+
+def test_record_to_dict_serializes_part_online():
+    """Запись минуты несёт ``part_online`` (change world-elastic-supply, задача 5.2)."""
+
+    quiet = ReplayLog()
+    fill_sync(quiet, micro_config(population={"scale": 50.0}), 5 / 1440)
+    payload = record_to_dict(quiet.record(4))
+    assert payload["part_online"] == 0
+    assert payload["online_drivers"] > 0

@@ -369,6 +369,29 @@ class ShiftsCfg(_CfgBase):
     online_share: OnlineShareCfg = Field(default_factory=OnlineShareCfg)
 
 
+class CalloutCfg(_CfgBase):
+    """Вызов подработчиков на линию (change ``world-elastic-supply``): правило и его шаг.
+
+    ``part`` — число подработчиков сверх штатного парка ``drivers.count``: на
+    линию они выходят только по вызову. ``lag_min`` — задержка от решения до
+    выхода, ``session_min`` — длительность сессии на линии, ``every_min`` —
+    период решений. ``min_gain`` — минимальный прирост сигнала водителям над
+    1.0, ``sensitivity`` — доля свободного резерва на единицу прироста,
+    ``max_share`` — потолок доли резерва на одну зону. При ``enabled = false``
+    (дефолт) шаг вызова не выполняется, парк равен ``drivers.count`` и мир
+    побитово совпадает с поведением до change'а.
+    """
+
+    enabled: bool = False
+    part: int = Field(default=60, ge=0)
+    lag_min: int = Field(default=20, ge=1)
+    session_min: int = Field(default=120, ge=1)
+    every_min: int = Field(default=5, ge=1)
+    min_gain: float = Field(default=0.10, ge=0.0)
+    sensitivity: float = Field(default=0.3, ge=0.0)
+    max_share: float = Field(default=0.3, gt=0.0, le=1.0)
+
+
 class DriversCfg(_CfgBase):
     """Парк водителей: размер, лимит ожидания назначения и отклик на тариф."""
 
@@ -377,6 +400,7 @@ class DriversCfg(_CfgBase):
     reposition: RepositionCfg = Field(default_factory=RepositionCfg)
     dispatch: DispatchCfg = Field(default_factory=DispatchCfg)
     shifts: ShiftsCfg = Field(default_factory=ShiftsCfg)
+    callout: CalloutCfg = Field(default_factory=CalloutCfg)
 
 
 class WeatherCfg(_CfgBase):
