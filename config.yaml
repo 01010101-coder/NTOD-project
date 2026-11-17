@@ -118,6 +118,10 @@ ml:                             # приложение А плана M3 (change 
   cls_weight: 1.0               # вес BCE в общем loss
   seed: 42                      # отдельный от мира seed обучения
   deficit_label: legacy         # метка ML-контура (change ml-harm-deficit-label): legacy | harm
+  planning:                     # прогноз вреда для планирования (change ml-planning-forecast)
+    horizons_min: [60, 120]     # горизонты упреждения, минут (кратны 5, [15, 240])
+    window_min: 30              # окно цели: вред хотя бы в одном бакете окна
+    artifacts_root: artifacts/planning  # отдельный корень, M3 его не читает
 
 policy:                         # ценовые политики (change m6-policy; прил. А плана M5+M6)
   horizon_min: 15               # лучший test-F1; фиксируется до генерации веток
