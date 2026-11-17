@@ -11,7 +11,8 @@ rain.demand_mult», «Пятничный вечер применяется то�
 ровно через лимит», «Назначение спасает от истечения». Точные равенства — там,
 где статистика не нужна (design.md, решение 6); статистические проверки — с
 фиксированными seed, большими выборками и широкими коридорами. Магические
-числа тестов — параметры конфигов, не кода.
+числа тестов — параметры конфигов, не кода. Change ``world-demand-shocks``
+добавил сценарий «Шок масштабирует λ» и проверку множителей шока в спавне.
 """
 
 import dataclasses
@@ -512,3 +513,52 @@ def test_trip_request_frozen_fields() -> None:
     assert order.price_multiplier == 1.3
     with pytest.raises(dataclasses.FrozenInstanceError):
         order.origin = 1  # type: ignore[misc]
+
+
+# --- множитель шока спроса в λ (change world-demand-shocks, задача 3.1) --------
+
+
+def test_lambda_shock_scales_rate() -> None:
+    """Сценарий «Шок масштабирует λ»: отношение λ при 1.25 и 1.0 равно 1.25."""
+
+    cfg = _flat_profiles_cfg()
+    city = build_city(cfg)
+    zone = city.zones[0]
+    base = _rate(city, zone, NO_FACTOR_MINUTE, cfg)
+    shocked = _rate(city, zone, NO_FACTOR_MINUTE, cfg, shock_mult=1.25)
+    assert shocked / base == pytest.approx(1.25)
+    assert _rate(city, zone, NO_FACTOR_MINUTE, cfg, shock_mult=1.0) == base
+
+
+def test_spawn_uses_zone_shock_multipliers() -> None:
+    """Спавн получает множители шока по зонам: весь поток зоны масштабируется."""
+
+    cfg = _origin_only_cfg()
+    city = build_city(cfg)
+    t = NO_FACTOR_MINUTE
+    base = _spawn(city, t, cfg, seed=11)
+    doubled = spawn_requests(
+        np.random.default_rng(11),
+        city,
+        t,
+        is_rain=False,
+        event_mult=1.0,
+        price_mult_by_zone=np.ones(len(city.zones)),
+        cfg=cfg,
+        shock_mult_by_zone=np.full(len(city.zones), 2.0),
+    )
+    # λ удвоена, поэтому розыгрыш Пуассона с тем же seed даёт больше заказов;
+    # точное отношение — свойство распределения, а не механики.
+    assert len(doubled) > len(base)
+    # Множитель 1.0 по всем зонам побитово повторяет прежний спавн.
+    unchanged = spawn_requests(
+        np.random.default_rng(11),
+        city,
+        t,
+        is_rain=False,
+        event_mult=1.0,
+        price_mult_by_zone=np.ones(len(city.zones)),
+        cfg=cfg,
+        shock_mult_by_zone=np.ones(len(city.zones)),
+    )
+    assert unchanged == base

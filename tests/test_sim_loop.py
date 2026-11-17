@@ -20,6 +20,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from common.config import AppConfig, DispatchCfg, load_config
@@ -27,6 +28,7 @@ from common.timeutil import add_minutes, bucket5, from_iso
 from simulator.aggregate import AggregateBuffer, _is_deficit
 from simulator.drivers import DriverState
 from simulator.engine import Engine, _cancel_prob
+from simulator.env import WorldEnv
 from simulator.shifts import online_target
 
 SIM_START = "2026-11-02"
@@ -1044,3 +1046,82 @@ def test_shifts_night_load_higher() -> None:
         ) / len(buckets)
 
     assert night_load(enabled=True) > night_load(enabled=False)
+
+
+# --- шоки спроса в минутном цикле (change world-demand-shocks, спека simulator-loop) ---
+
+
+def _shock_config(*, enabled: bool, city_sigma: float = 0.12) -> AppConfig:
+    """Эталонный конфиг с заданным флагом шоков и σ городской компоненты."""
+
+    cfg = load_config(REFERENCE_CONFIG).model_copy(deep=True)
+    cfg.demand.shocks.enabled = enabled
+    cfg.demand.shocks.city_sigma = city_sigma
+    return cfg
+
+
+def test_shocks_change_demand() -> None:
+    """Сценарий «Шоки меняют спрос»: 7 суток, σ=0.3, итог в пределах 10 %."""
+
+    def run(cfg: AppConfig) -> tuple[Counter, int]:
+        writer = StubWriter()
+        summary = Engine(cfg, seed=REFERENCE_SEED).run(7, writer)
+        hourly = Counter()
+        for row in writer.metrics:
+            hourly[row["ts"].replace(minute=0)] += row["requests"]
+        return hourly, summary.trips_total
+
+    hourly_on, total_on = run(_shock_config(enabled=True, city_sigma=0.3))
+    hourly_off, total_off = run(_shock_config(enabled=False))
+
+    assert hourly_on != hourly_off
+    assert abs(total_on - total_off) <= 0.10 * total_off
+
+
+def test_shock_path_same_across_price_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Сценарий «Путь шоков одинаков во всех ветках seed»: политика ×1.3 не меняет путь."""
+
+    recorded: list[tuple[datetime, int, float]] = []
+    original = WorldEnv.demand_factor
+
+    def spy(self: WorldEnv, zone_id: int, t: datetime) -> float:
+        value = original(self, zone_id, t)
+        recorded.append((t, zone_id, value))
+        return value
+
+    monkeypatch.setattr(WorldEnv, "demand_factor", spy)
+    cfg = _shock_config(enabled=True)
+    Engine(cfg, seed=REFERENCE_SEED).run(1, StubWriter())
+    without_policy = list(recorded)
+    recorded.clear()
+    price_fn = lambda zone_id, _t: 1.3  # noqa: E731
+    Engine(cfg, seed=REFERENCE_SEED, price_fn=price_fn).run(1, StubWriter())
+
+    assert len(without_policy) == len(recorded) == 1440 * len(cfg.city.zones)
+    assert recorded == without_policy
+    assert len({factor for _t, _zone, factor in without_policy}) > 1
+
+
+def test_engine_spawns_four_streams_preserving_first_three() -> None:
+    """Четыре потока ``spawn(4)``: первые три совпадают со ``spawn(3)`` того же seed."""
+
+    four = np.random.SeedSequence(REFERENCE_SEED).spawn(4)
+    three = np.random.SeedSequence(REFERENCE_SEED).spawn(3)
+    assert [child.spawn_key for child in four] == [
+        (0,),
+        (1,),
+        (2,),
+        (3,),
+    ]
+    for child4, child3 in zip(four[:3], three, strict=True):
+        assert child4.spawn_key == child3.spawn_key
+        draws4 = np.random.default_rng(child4).integers(0, 2**31, size=8)
+        draws3 = np.random.default_rng(child3).integers(0, 2**31, size=8)
+        assert np.array_equal(draws4, draws3)
+
+    # Четвёртый поток детерминирован по seed и принадлежит именно шокам.
+    first = Engine(_shock_config(enabled=True), seed=REFERENCE_SEED)
+    second = Engine(_shock_config(enabled=True), seed=REFERENCE_SEED)
+    draws_first = first._rng_shock.integers(0, 2**31, size=8)
+    draws_second = second._rng_shock.integers(0, 2**31, size=8)
+    assert np.array_equal(draws_first, draws_second)

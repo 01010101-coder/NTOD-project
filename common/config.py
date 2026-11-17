@@ -196,12 +196,30 @@ class PopulationCfg(_CfgBase):
     scale: float = 1.0
 
 
+class ShocksCfg(_CfgBase):
+    """Шоки спроса (change ``world-demand-shocks``): скрытый множитель зоны.
+
+    ``*_sigma`` — стационарное стандартное отклонение компоненты логарифма
+    множителя (город, зона, сутки), ``*_tau_min`` — время корреляции в
+    минутах для AR(1) городской и зональной компонент. При ``enabled = false``
+    (дефолт) мир побитово совпадает с поведением до change'а.
+    """
+
+    enabled: bool = False
+    city_sigma: float = Field(default=0.12, ge=0.0)
+    city_tau_min: float = Field(default=240.0, gt=0.0)
+    zone_sigma: float = Field(default=0.10, ge=0.0)
+    zone_tau_min: float = Field(default=120.0, gt=0.0)
+    day_sigma: float = Field(default=0.08, ge=0.0)
+
+
 class DemandCfg(_CfgBase):
     """Спрос: базовая интенсивность, суточные профили по архетипам и затухание."""
 
     base_rate: float = 2.0
     profiles: dict[str, dict[str, list[float]]] = Field(default_factory=_default_profiles)
     dest_decay_min: int = 12  # финальное число калибровки m2-calibration
+    shocks: ShocksCfg = Field(default_factory=ShocksCfg)
 
     @field_validator("profiles")
     @classmethod

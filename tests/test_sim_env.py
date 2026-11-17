@@ -12,7 +12,9 @@
 проверяется по её API и каноническим значениям приложения А (design.md,
 решение 10). Форс-режимы задаются правкой значений конфига, без новых
 параметров API; окна эпизодов находятся по наблюдаемому состоянию
-(proposal.md, вопрос 2).
+(proposal.md, вопрос 2). Change ``world-demand-shocks`` добавил сценарии
+«Среднее множителя около 1», «Персистентность компоненты», «Детерминизм шоков
+по seed», «Чтение не тратит rng» и «Шоки не сдвигают дождь и инъекции».
 """
 
 from datetime import datetime, timedelta
@@ -352,3 +354,104 @@ def test_queries_do_not_shift_rng_stream() -> None:
     assert _observable(polled, city.zones, DAY1, 1440) == _observable(
         silent, city.zones, DAY1, 1440
     )
+
+
+# --- шоки спроса (change world-demand-shocks, спека simulator-env) --------------
+
+SHOCK_SEED = 2026
+"""Seed потока шоков в тестах; отдельный от SEED, чтобы не путать потоки."""
+
+
+def _shock_env(**overrides) -> tuple[WorldEnv, AppConfig]:
+    """Среда эталонного конфига с включёнными шоками и переопределениями полей."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    cfg.demand.shocks.enabled = True
+    for field, value in overrides.items():
+        setattr(cfg.demand.shocks, field, value)
+    env = WorldEnv(cfg, np.random.default_rng(SEED), np.random.default_rng(SHOCK_SEED))
+    return env, cfg
+
+
+def _shock_series(env: WorldEnv, cfg: AppConfig, minutes: int) -> np.ndarray:
+    """Поминутные множители всех зон: массив ``(минуты, зоны)`` в порядке id."""
+
+    series = np.empty((minutes, len(cfg.city.zones)), dtype=float)
+    for minute in range(minutes):
+        stamp = DAY0 + timedelta(minutes=minute)
+        env.advance_minute(stamp)
+        series[minute] = [env.demand_factor(zone.id, stamp) for zone in cfg.city.zones]
+    return series
+
+
+def test_shocks_mean_near_one() -> None:
+    """Сценарий «Среднее множителя около 1»: 60 сим-суток, дефолтные σ, [0.95, 1.05]."""
+
+    env, cfg = _shock_env()
+    series = _shock_series(env, cfg, 60 * 1440)
+    mean = float(series.mean())
+    assert 0.95 <= mean <= 1.05, mean
+
+
+def test_shocks_persistence_component() -> None:
+    """Сценарий «Персистентность компоненты»: лаг 60 при τ=240 даёт ACF [0.70, 0.85]."""
+
+    env, cfg = _shock_env(zone_sigma=0.0, day_sigma=0.0, city_tau_min=240)
+    series = _shock_series(env, cfg, 60 * 1440)
+    log_factor = np.log(series[:, 0])
+    acf = float(np.corrcoef(log_factor[:-60], log_factor[60:])[0, 1])
+    assert 0.70 <= acf <= 0.85, acf
+
+
+def test_shocks_deterministic_by_seed() -> None:
+    """Сценарий «Детерминизм шоков по seed»: одинаковые генераторы — одинаковый путь."""
+
+    first, cfg = _shock_env()
+    second, _ = _shock_env()
+    assert np.array_equal(_shock_series(first, cfg, 2 * 1440), _shock_series(second, cfg, 2 * 1440))
+
+
+def test_shock_reads_do_not_consume_rng() -> None:
+    """Сценарий «Чтение не тратит rng»: опрос demand_factor не сдвигает путь шоков."""
+
+    polled, cfg = _shock_env()
+    silent, _ = _shock_env()
+    expected = _shock_series(polled, cfg, 1440)
+    observed = np.empty_like(expected)
+    for minute in range(1440):
+        stamp = DAY0 + timedelta(minutes=minute)
+        silent.advance_minute(stamp)
+        observed[minute] = [silent.demand_factor(zone.id, stamp) for zone in cfg.city.zones]
+        for _ in range(3):  # повторные чтения той же минуты тоже не тратят rng
+            for zone in cfg.city.zones:
+                silent.demand_factor(zone.id, stamp)
+    assert np.array_equal(expected, observed)
+
+
+def test_shocks_do_not_shift_rain_and_injections() -> None:
+    """Сценарий «Шоки не сдвигают дождь и инъекции»: 30 суток, эпизоды совпадают."""
+
+    cfg = _forced_config()
+    cfg.demand.shocks.enabled = True
+    with_shocks = WorldEnv(cfg, np.random.default_rng(SEED), np.random.default_rng(SHOCK_SEED))
+    cfg_off = _forced_config()
+    cfg_off.demand.shocks.enabled = False
+    without_shocks = WorldEnv(cfg_off, np.random.default_rng(SEED))
+    city = build_city(cfg)
+    for day in range(30):
+        with_shocks.advance_day(day)
+        without_shocks.advance_day(day)
+        day_start = DAY0 + timedelta(days=day)
+        assert _observable(with_shocks, city.zones, day_start, SCAN_MINUTES) == _observable(
+            without_shocks, city.zones, day_start, SCAN_MINUTES
+        )
+
+
+def test_disabled_shocks_factor_is_one_without_generator() -> None:
+    """При выключенных шоках множитель 1.0, генератор шоков не требуется."""
+
+    cfg = load_config(REFERENCE_CONFIG)
+    env = WorldEnv(cfg, np.random.default_rng(SEED))
+    stamp = DAY0 + timedelta(minutes=13)
+    env.advance_minute(stamp)
+    assert all(env.demand_factor(zone.id, stamp) == 1.0 for zone in cfg.city.zones)

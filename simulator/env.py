@@ -1,17 +1,25 @@
-"""Среда мира симулятора M2: погода, календарь событий и тариф зон.
+"""Среда мира симулятора M2: погода, календарь событий, тариф зон и шоки спроса.
 
 Публичный контракт — приложение Б плана M2 (``docs/plan-m2-engine.md``):
-конструктор ``WorldEnv(cfg, rng)``, суточный шаг ``advance_day`` и запросы
-``is_rain``/``event_label``/``price_multiplier``. Розыгрыши дождя и
-surge-инъекций выполняются безусловно в ``advance_day`` единственным
+конструктор ``WorldEnv(cfg, rng, shock_rng=None)``, суточный шаг ``advance_day``,
+поминутный шаг шоков ``advance_minute`` и запросы
+``is_rain``/``event_label``/``price_multiplier``/``demand_factor``. Розыгрыши
+дождя и surge-инъекций выполняются безусловно в ``advance_day`` единственным
 переданным снаружи генератором (§3.6, §3.7, §10.13 плана): запросы — чистые
 чтения состояния и ``rng`` не тратят, поэтому при заданном seed эпизоды
 детерминированы, а ветки A/B сравнимы попарно. Эпизоды хранятся как
 абсолютные интервалы сим-времени ``[начало, конец)`` без усечения полуночью
 (решение 6 design.md change'а m2-env): эпизод, перешедший через полночь,
 действует и в минуты следующих суток.
+
+Change ``world-demand-shocks`` добавил скрытый множитель спроса зоны: три
+лог-нормальные компоненты (город, зона, сутки), городская и зональная —
+AR(1) с поминутным шагом. Розыгрыши шоков идут отдельным генератором
+``shock_rng`` (четвёртый поток ``Engine``) и не сдвигают дождь и инъекции;
+при выключенных шоках генератор не используется, а ``demand_factor`` = 1.0.
 """
 
+import math
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -37,15 +45,29 @@ def _parse_day_start(value: str) -> datetime:
 
 
 class WorldEnv:
-    """Среда мира: состояние погоды, календарных событий и тарифа сим-суток.
+    """Среда мира: состояние погоды, календарных событий, тарифа и шоков спроса.
 
-    Единственный источник случайности — ``Generator``, переданный
-    конструктору (§3.7: генератор создаёт ``Engine`` и передаёт модулям);
-    wall-clock время не используется (§10.10 — только сим-время снаружи).
+    Случайность приходит генераторами, созданными ``Engine`` и переданными
+    конструктору (§3.7): ``rng`` — суточные розыгрыши дождя и инъекций,
+    ``shock_rng`` — поминутные шаги шоков спроса (change
+    ``world-demand-shocks``, design.md решение 3); wall-clock время не
+    используется (§10.10 — только сим-время снаружи).
     """
 
-    def __init__(self, cfg: AppConfig, rng: np.random.Generator) -> None:
-        """Сохранить конфигурацию и генератор; сутки стартуют без эпизодов."""
+    def __init__(
+        self,
+        cfg: AppConfig,
+        rng: np.random.Generator,
+        shock_rng: np.random.Generator | None = None,
+    ) -> None:
+        """Сохранить конфигурацию и генераторы; сутки стартуют без эпизодов.
+
+        ``shock_rng`` — отдельный генератор шоков спроса (четвёртый поток
+        ``Engine``, design.md решение 3); при выключенных шоках он не нужен и
+        не используется. При включённых шоках начальные значения компонент
+        разыгрываются из стационарного распределения ``N(0, σ²)`` сразу, чтобы
+        множитель был стационарен с первой минуты.
+        """
         self._cfg = cfg
         self._rng = rng
         # Живые эпизоды дождя — абсолютные интервалы [начало, конец)
@@ -57,6 +79,20 @@ class WorldEnv:
         # (§3.6). При пересечении хвоста и нового окна одной зоны приоритет
         # у окна разыгранных суток — запросы читают список с конца.
         self._surges: list[tuple[datetime, datetime, int, float]] = []
+        # Состояние шоков спроса (change world-demand-shocks): городская
+        # компонента, компоненты зон по возрастанию zone_id и уровень суток.
+        self._shocks = cfg.demand.shocks
+        self._shock_rng = shock_rng
+        self._shock_zone_ids = sorted(zone.id for zone in cfg.city.zones)
+        self._x_city = 0.0
+        self._x_zone: dict[int, float] = {zone_id: 0.0 for zone_id in self._shock_zone_ids}
+        self._x_day = 0.0
+        if self._shocks.enabled:
+            if shock_rng is None:
+                raise ValueError("включённые шоки спроса требуют отдельный генератор shock_rng")
+            self._x_city = float(shock_rng.normal(0.0, self._shocks.city_sigma))
+            for zone_id in self._shock_zone_ids:
+                self._x_zone[zone_id] = float(shock_rng.normal(0.0, self._shocks.zone_sigma))
 
     def advance_day(self, day_index: int) -> None:
         """Перейти на сутки ``day_index`` (выполняется в 00:00 сим-суток).
@@ -107,6 +143,55 @@ class WorldEnv:
                     float(self._rng.uniform(injection.multiplier[0], injection.multiplier[1])),
                 )
             )
+
+    def _ar1_step(self, value: float, sigma: float, rho: float) -> float:
+        """Один шаг AR(1): ``ρ·x + σ·√(1 − ρ²)·ε`` с розыгрышем ``ε`` из потока шоков."""
+
+        if self._shock_rng is None:  # защита типов: включённые шоки требуют генератор
+            raise ValueError("генератор шоков не передан среде")
+        eps = float(self._shock_rng.normal())
+        return rho * value + sigma * math.sqrt(1.0 - rho * rho) * eps
+
+    def advance_minute(self, t: datetime) -> None:
+        """Шаг шоков спроса на минуту ``t`` (шаг 1 цикла при включённых шоках).
+
+        Порядок розыгрываний фиксирован (спека simulator-env, design.md
+        решение 2): на 00:00 суток сначала суточная компонента ``d``, затем
+        городская ``x_c``, затем компоненты зон по возрастанию ``zone_id``.
+        Шаг выполняется безусловно на каждой минуте основной фазы и не
+        зависит от тарифа и решений политики; при выключенных шоках он
+        ничего не делает и генератор не тратит.
+        """
+
+        if not self._shocks.enabled:
+            return
+        if t.hour == 0 and t.minute == 0:
+            assert self._shock_rng is not None
+            self._x_day = float(self._shock_rng.normal(0.0, self._shocks.day_sigma))
+        rho_city = math.exp(-1.0 / self._shocks.city_tau_min)
+        self._x_city = self._ar1_step(self._x_city, self._shocks.city_sigma, rho_city)
+        rho_zone = math.exp(-1.0 / self._shocks.zone_tau_min)
+        for zone_id in self._shock_zone_ids:
+            self._x_zone[zone_id] = self._ar1_step(
+                self._x_zone[zone_id], self._shocks.zone_sigma, rho_zone
+            )
+
+    def demand_factor(self, zone_id: int, t: datetime) -> float:
+        """Скрытый множитель спроса зоны ``zone_id`` на текущую минуту; rng не тратит.
+
+        ``exp(x_c + x_z + d − (σ_г² + σ_з² + σ_д²)/2)``: поправка сохраняет
+        среднее множителя равным 1, поэтому калибровка уровня спроса не
+        сдвигается (design.md, решение 1). Чтение чистое: ``advance_minute``
+        уже сдвинул состояние, а сам запрос генератор не трогает. При
+        выключенных шоках — ровно 1.0 без чтения состояния.
+        """
+
+        if not self._shocks.enabled:
+            return 1.0
+        correction = (
+            self._shocks.city_sigma**2 + self._shocks.zone_sigma**2 + self._shocks.day_sigma**2
+        ) / 2.0
+        return math.exp(self._x_city + self._x_zone[zone_id] + self._x_day - correction)
 
     def is_rain(self, t: datetime) -> bool:
         """Сообщить, идёт ли дождь в момент ``t``; ``rng`` не тратит.
