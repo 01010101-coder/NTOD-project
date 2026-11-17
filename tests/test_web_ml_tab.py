@@ -221,8 +221,12 @@ def _write_artifacts(root: Path) -> None:
     (root / "summary-2026-11-06.json").write_text(json.dumps(latest), encoding="utf-8")
 
 
-def lab_config(db_path: Path) -> AppConfig:
-    """Синтетический мир (2 зоны, тихий) с БД эпохи в tmp_path."""
+def lab_config(db_path: Path, *, deficit_label: str = "legacy") -> AppConfig:
+    """Синтетический мир (2 зоны, тихий) с БД эпохи в tmp_path.
+
+    ``deficit_label`` — правило метки ML-контура конфига сервера (change
+    ``ml-harm-deficit-label``); дефолт ``legacy`` — правило контракта.
+    """
 
     return AppConfig.model_validate(
         {
@@ -239,16 +243,19 @@ def lab_config(db_path: Path) -> AppConfig:
                 "episode_duration_h": [1, 1],
             },
             "pricing": {"surge_injection": {"day_chance": 0.0}},
-            "ml": {"db": str(db_path)},
+            "ml": {"db": str(db_path), "deficit_label": deficit_label},
         }
     )
 
 
-def make_lab_app(db_path: Path, artifacts_dir: Path):
+def make_lab_app(db_path: Path, artifacts_dir: Path, *, deficit_label: str = "legacy"):
     """Приложение без фонового тика и с коротким тихим прогоном мира."""
 
     return create_app(
-        lab_config(db_path), days=0.05, tick_interval=None, artifacts_dir=artifacts_dir
+        lab_config(db_path, deficit_label=deficit_label),
+        days=0.05,
+        tick_interval=None,
+        artifacts_dir=artifacts_dir,
     )
 
 
@@ -401,9 +408,38 @@ def test_forecasts_filters_fact_and_deficit(lab):
     assert supplied[0]["actual_requests"] == pytest.approx(10.0)
 
 
+def test_forecasts_harm_fact_by_loss(tmp_path):
+    """Спека «Факт дефицита по вреду»: сервер с harm на бакете (free 1,
+    requests 10, unfulfilled 0) даёт ``actual_deficit`` false, при legacy — true."""
+    db_path = tmp_path / "epoch.db"
+    conn = sqlite3.connect(db_path)
+    init_db(conn)
+    insert_zone_metrics(conn, _metrics_rows())
+    insert_forecasts(conn, _forecast_rows())
+    # Зона 0: соотношение без потерь — 1 свободная машина на 10 заказов.
+    conn.execute(
+        "UPDATE zone_metrics_5min SET requests = 10, free_drivers = 1, unfulfilled = 0"
+        " WHERE zone_id = 0"
+    )
+    conn.commit()
+    conn.close()
+    artifacts = tmp_path / "artifacts"
+    _write_artifacts(artifacts)
+
+    def actual_deficit(label: str):
+        with TestClient(make_lab_app(db_path, artifacts, deficit_label=label)) as client:
+            rows = client.get(
+                "/api/ml/forecasts",
+                params={"zone": 0, "model": "mlp-v1-test", "horizon": 15},
+            ).json()["forecasts"]
+        return rows[0]["actual_deficit"]
+
+    assert actual_deficit("harm") is False  # потерь нет — вреда нет
+    assert actual_deficit("legacy") is True  # 1/10 < 0.5
+
+
 def test_forecasts_null_fact_tail(lab):
     """Хвост без факт-бакета (17:15 + 30 мин = 17:45) — поля факта null (3.1)."""
-
     client, _ = lab
     rows = client.get(
         "/api/ml/forecasts", params={"zone": 0, "model": "mlp-v1-test", "horizon": 30}

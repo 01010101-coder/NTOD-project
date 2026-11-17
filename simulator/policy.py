@@ -9,8 +9,10 @@
 не меняет цену и мир. Числа ступеней и порогов живут в секции ``policy:``
 конфига (прил. А плана ``docs/plan-m5-m6-policy.md``), стартовые значения
 калибруются в change'е ``m6-worlds``. Правило дефицита — единственное правило
-контракта (:func:`ml.dataset.deficit_label`); реактивная политика не
-сглаживает и не предсказывает — только факт. Направление зависимости
+контракта (:func:`ml.dataset.deficit_label`, всегда ``rule="legacy"``);
+реактивная политика не зависит от ``ml.deficit_label`` — метки моделей change'а
+``ml-harm-deficit-label`` — не сглаживает и не предсказывает: только факт.
+Направление зависимости
 simulator → ml — решение 1 design.md: ml-слой M3 не знает про движок,
 политика потребляет его публичные контракты.
 
@@ -128,11 +130,15 @@ def compose_tariff(world_tariff: float, multiplier: float, total_cap: float) -> 
 def has_deficit(row: Mapping[str, Any]) -> bool:
     """Дефицит строки метрик закрытого бакета по правилу контракта.
 
-    Единственное правило (:func:`ml.dataset.deficit_label`):
+    Правило контракта данных (:func:`ml.dataset.deficit_label`):
     ``free_drivers / max(requests, 1) < 0.5`` **или** ``unfulfilled > 0``.
+    ``rule="legacy"`` задан явно: реактивная политика — показатель мира, она
+    не зависит от ``ml.deficit_label`` (метки моделей; change
+    ``ml-harm-deficit-label``), и при ``harm`` срабатывает так же, как при
+    ``legacy``. Так из кода видно, что независимость намеренная.
     """
 
-    return deficit_label(row["requests"], row["free_drivers"], row["unfulfilled"])
+    return deficit_label(row["requests"], row["free_drivers"], row["unfulfilled"], rule="legacy")
 
 
 def reactive_multiplier(row: Mapping[str, Any] | None, reactive_mult: float) -> float:

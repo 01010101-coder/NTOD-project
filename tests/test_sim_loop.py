@@ -454,6 +454,27 @@ def test_reference_run_bitwise_compatibility() -> None:
     assert _rows_digest(writer.metrics) == REFERENCE_METRICS_SHA256
 
 
+def test_world_indicators_independent_of_deficit_label() -> None:
+    """Спека «Показатели мира не зависят от ключа» (change ml-harm-deficit-label):
+    один seed при ``ml.deficit_label: legacy`` и ``harm`` даёт те же строки
+    ``trips`` и ``zone_metrics_5min`` и ту же ``Summary.deficit_share``."""
+    legacy = _reference_config(enabled=False)
+    harm = _reference_config(enabled=False)
+    harm.ml.deficit_label = "harm"
+    assert legacy.ml.deficit_label != harm.ml.deficit_label
+
+    writers = {}
+    summaries = {}
+    for label, cfg in (("legacy", legacy), ("harm", harm)):
+        writers[label] = StubWriter()
+        summaries[label] = Engine(cfg, seed=REFERENCE_SEED).run(360 / 1440, writers[label])
+
+    assert len(writers["legacy"].trips) > 0  # прогон не пустой
+    assert _rows_digest(writers["harm"].trips) == _rows_digest(writers["legacy"].trips)
+    assert _rows_digest(writers["harm"].metrics) == _rows_digest(writers["legacy"].metrics)
+    assert summaries["harm"].deficit_share == summaries["legacy"].deficit_share
+
+
 # --- Отклик предложения в минутном цикле (change m6-supply-response, задача 5.2) ---
 
 

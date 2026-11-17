@@ -13,7 +13,7 @@
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -429,6 +429,13 @@ class MlCfg(_CfgBase):
     победило окно 3 — val MAE спроса 1.806 против 1.848/1.843, синхронно с
     config.yaml, как ``dest_decay_min`` после m2-calibration);
     гиперпараметры обучения заводятся один раз на все changes вехи M3.
+
+    ``deficit_label`` — правило метки дефицита ML-контура (change
+    ``ml-harm-deficit-label``): ``legacy`` — правило контракта данных
+    (``free_drivers / max(requests, 1) < 0.5`` или ``unfulfilled > 0``,
+    дефолт), ``harm`` — только вред (``unfulfilled > 0``). Ключ живёт в
+    ``ml``, потому что это свойство таргета обучения, а не мира: он попадает
+    в снимок артефакта модели без отдельного кода.
     """
 
     db: str = "data/m3_epoch.db"
@@ -447,6 +454,7 @@ class MlCfg(_CfgBase):
     patience: int = 8
     cls_weight: float = 1.0
     seed: int = 42  # отдельный от мира seed обучения
+    deficit_label: Literal["legacy", "harm"] = "legacy"  # правило метки ML-контура
 
 
 # Стартовые числа политики — приложение А плана M5+M6 (docs/plan-m5-m6-policy.md);

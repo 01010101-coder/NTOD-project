@@ -25,6 +25,7 @@ design.md), миграция PK (:func:`storage.schema.ensure_forecasts_schema`)
 
 import json
 import sqlite3
+import sys
 from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ from ml.dataset import (
     RET_HORIZONS_MIN,
     DatasetScalers,
     DayRole,
+    DeficitRule,
     Examples,
     RowSource,
     collect_examples,
@@ -136,7 +138,9 @@ def collect_role_examples(
 ) -> Examples:
     """Примеры роли ``role`` тем же сборщиком, что и обучение (решение 1 design.md):
     границы «есть окно и оба целевых бакета» встроены, ключи (зона, ts) дают
-    привязку строк. Параметры ролей и окна — из снимка ``ml_cfg``. Роль
+    привязку строк. Параметры ролей и окна — из снимка ``ml_cfg``; правило метки
+    таргетов — тоже из снимка (``ml_cfg.deficit_label``): сборка согласована с
+    обучением, хотя на прогноз метки не влияют. Роль
     ``"test"`` обслуживает walk-forward M3, ``"val"`` — δ-калибровку политики
     (change ``m6-worlds``): одна машина сбора гарантирует одинаковые наборы пар
     у обоих семейств при согласованных снимках."""
@@ -151,6 +155,7 @@ def collect_role_examples(
         val_days=ml_cfg.val_days,
         test_days=ml_cfg.test_days,
         window_hours=ml_cfg.window_hours,
+        label_rule=ml_cfg.deficit_label,
     )[role]
 
 
@@ -245,15 +250,19 @@ def walk_forward_model(
     return _network_rows(artifact, examples)
 
 
-def walk_forward_naives(source: RowSource, examples: Examples) -> dict[str, list[dict]]:
+def walk_forward_naives(
+    source: RowSource, examples: Examples, *, label_rule: DeficitRule = "legacy"
+) -> dict[str, list[dict]]:
     """Наивы тем же проходом (задача 2.4): ``naive_persist``/``naive_season``
     по ключам test-роли тех же примеров — наборы пар совпадают с сетями;
     отсутствие вчерашнего слота у сезонного — молчаливый пропуск (спека
-    ``ml-baselines``)."""
+    ``ml-baselines``). ``label_rule`` — правило ``ml.deficit_label`` живого
+    конфига: вероятность наива «как сейчас» стоит на той же метке, что факт
+    сводной; сезонный наив остаётся на правиле контракта."""
 
     rows: dict[str, list[dict]] = {NAIVE_PERSIST_V1: [], NAIVE_SEASON_V1: []}
     for zone_id, ts in examples.keys:
-        rows[NAIVE_PERSIST_V1].extend(naive_persist(source, ts, zone_id))
+        rows[NAIVE_PERSIST_V1].extend(naive_persist(source, ts, zone_id, label_rule=label_rule))
         rows[NAIVE_SEASON_V1].extend(naive_season(source, ts, zone_id))
     return rows
 
@@ -276,6 +285,11 @@ def run_inference(
     каждой версии delete + insert — повтор идемпотентен, чужие версии не
     трогаются. Наив-прогон без сетей берёт границы ролей из живого ``ml:``
     конфига (снимков у наивов нет).
+
+    Правило метки оценки — живой ``cfg.ml.deficit_label``: все версии (сети и
+    наивы) стоят на одной метке. Расхождение со снимком артефакта не ошибка
+    (сравнить старую ``legacy``-сеть на ``harm``-факте осмысленно), но CLI
+    печатает предупреждение с версией и обоими правилами в stderr и продолжает.
     """
 
     if models not in _FAMILY_SETS:
@@ -305,6 +319,15 @@ def run_inference(
         for family in ("mlp", "lstm")
         if family in dirs
     }
+    label_rule = cfg.ml.deficit_label
+    for artifact in network.values():
+        if artifact.ml_cfg.deficit_label != label_rule:
+            print(
+                f"предупреждение: {artifact.model_version} обучена на правиле метки"
+                f" {artifact.ml_cfg.deficit_label!r}, а конфиг задаёт {label_rule!r};"
+                " оценка версии идёт по правилу конфига",
+                file=sys.stderr,
+            )
     if network:
         snapshots = {
             (
@@ -331,7 +354,7 @@ def run_inference(
     written: list[InferredVersion] = []
     for family in families:
         if family == "naive":
-            versions = walk_forward_naives(source, examples).items()
+            versions = walk_forward_naives(source, examples, label_rule=label_rule).items()
         else:
             artifact = network[family]
             versions = [(artifact.model_version, _network_rows(artifact, examples))]
@@ -347,16 +370,24 @@ def summarize_run(
     source: RowSource,
     versions: Sequence[InferredVersion],
     *,
+    label_rule: DeficitRule = "legacy",
     artifacts_root: str | Path = ARTIFACTS_ROOT,
 ) -> tuple[Path, str]:
     """Сводная прогона (задача 3.2): по строкам из БД (решение 5 design.md —
     чтение валидирует записанное) — ``build_summary`` каждой версии →
     ``artifacts/summary-<локальная дата>.json`` (``{"date", "summaries"}``) и
-    печатная таблица :func:`ml.metrics.render_table`."""
+    печатная таблица :func:`ml.metrics.render_table`.
+
+    ``label_rule`` — правило метки живого конфига (``ml.deficit_label``): факт
+    дефицита, F1 и калибровка всех версий считаются на одной метке.
+    """
 
     summaries = [
         build_summary(
-            version.model_version, list_forecasts(conn, model_version=version.model_version), source
+            version.model_version,
+            list_forecasts(conn, model_version=version.model_version),
+            source,
+            label_rule=label_rule,
         )
         for version in versions
     ]

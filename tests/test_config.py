@@ -193,6 +193,31 @@ def test_ml_unknown_key_rejected() -> None:
         AppConfig.model_validate({"ml": {"wind_hours": 6}})
 
 
+def test_ml_deficit_label_default_legacy(tmp_path: Path) -> None:
+    """Конфиг без ключа ``deficit_label`` (дефолты и файл) даёт ``legacy``."""
+
+    assert AppConfig().ml.deficit_label == "legacy"
+    path = tmp_path / "config.yaml"
+    path.write_text("ml:\n  db: data/other.db\n", encoding="utf-8")
+    assert load_config(path).ml.deficit_label == "legacy"
+
+
+def test_ml_deficit_label_harm_accepted(tmp_path: Path) -> None:
+    """Значение ``harm`` принимается и в модели, и из YAML-файла."""
+
+    assert AppConfig.model_validate({"ml": {"deficit_label": "harm"}}).ml.deficit_label == "harm"
+    path = tmp_path / "config.yaml"
+    path.write_text("ml:\n  deficit_label: harm\n", encoding="utf-8")
+    assert load_config(path).ml.deficit_label == "harm"
+
+
+def test_ml_deficit_label_unknown_rejected() -> None:
+    """Значение вне ``{legacy, harm}`` отклоняется с путём ``ml.deficit_label``."""
+
+    with pytest.raises(ValidationError, match="ml.deficit_label"):
+        AppConfig.model_validate({"ml": {"deficit_label": "loss"}})
+
+
 def test_policy_section_defaults() -> None:
     """Конфиг без секции ``policy`` грузится: значения — приложение А плана M5+M6
     (задача 1.1), δ-сдвиги — результат калибровки change ``m6-worlds``."""

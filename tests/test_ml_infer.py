@@ -31,7 +31,14 @@ from ml.infer import (
     walk_forward_model,
     walk_forward_naives,
 )
-from ml.train import model_version_for, prepare_training_data, save_model_artifacts, train_model
+from ml.metrics import deficit_metrics, join_facts
+from ml.train import (
+    WEIGHTS_FILE,
+    model_version_for,
+    prepare_training_data,
+    save_model_artifacts,
+    train_model,
+)
 from storage.db import connect
 from storage.repo import insert_forecasts, insert_zone_metrics, list_forecasts
 from storage.schema import init_db
@@ -238,6 +245,20 @@ def test_load_model_artifact_roundtrip(pattern_db: Path, tmp_path: Path, arch: s
     assert torch.equal(saved.pred_free_drivers, trained.pred_free_drivers)
     assert torch.equal(saved.deficit_logits, trained.deficit_logits)
     assert torch.equal(saved.deficit_prob, trained.deficit_prob)
+
+
+def test_load_old_artifact_without_label_is_legacy(pattern_db: Path, tmp_path: Path) -> None:
+    """Снимок без ``deficit_label`` (артефакт до change'а) читается как ``legacy``:
+    восстановление успешно, правило метки артефакта — legacy."""
+    model_dir = _train_and_save(tmp_path / "artifacts", pattern_db, "mlp")
+    blob = torch.load(model_dir / WEIGHTS_FILE, weights_only=True)
+    del blob["ml_cfg"]["deficit_label"]
+    torch.save(blob, model_dir / WEIGHTS_FILE)
+
+    artifact = load_model_artifact(model_dir, n_zones=len(CITY_ZONES))
+
+    assert artifact.ml_cfg.deficit_label == "legacy"
+    assert artifact.ml_cfg.window_hours == 1  # остальной снимок не пострадал
 
 
 def test_load_uses_snapshot_not_live_config(pattern_db: Path, tmp_path: Path) -> None:
@@ -647,6 +668,67 @@ def test_summarize_run_json_and_table(pattern_db: Path, artifacts_root: Path) ->
         assert column in lines[0]
     for version in versions:
         assert version.model_version in table
+
+
+def test_run_warns_label_mismatch_and_summarizes_on_config_rule(
+    pattern_db: Path, tmp_path: Path, artifacts_root: Path, capsys
+) -> None:
+    """Артефакты legacy при конфиге harm: предупреждение в stderr с версией и
+    обоими правилами, работа продолжается; сводная считает F1 по harm-факту."""
+    db_path = tmp_path / "label.db"
+    shutil.copy(pattern_db, db_path)
+    target = SIM_START + timedelta(days=2, hours=12, minutes=15)
+    conn = connect(str(db_path))
+    # Целевой бакет с дефицитом только по соотношению: free 0, потерь нет.
+    conn.execute(
+        "UPDATE zone_metrics_5min SET free_drivers = 0, unfulfilled = 0,"
+        " supply_demand_ratio = 0.0 WHERE zone_id = 0 AND ts = ?",
+        (target.strftime("%Y-%m-%d %H:%M:%S"),),
+    )
+    conn.close()
+
+    cfg = AppConfig.model_validate({"ml": {"deficit_label": "harm"}})
+    source = SqliteRowSource(db_path)
+    conn = connect(str(db_path))
+    try:
+        versions = run_inference(source, conn, cfg=cfg, models="all", artifacts_root=artifacts_root)
+        summary_path, table = summarize_run(
+            conn,
+            source,
+            versions,
+            label_rule=cfg.ml.deficit_label,
+            artifacts_root=artifacts_root,
+        )
+        stored = {
+            version.model_version: list_forecasts(conn, model_version=version.model_version)
+            for version in versions
+        }
+    finally:
+        conn.close()
+
+    err = capsys.readouterr().err
+    for version in versions:
+        if version.model_version.startswith(("mlp", "lstm")):
+            assert version.model_version in err  # расхождение названо по версии
+    assert "'legacy'" in err and "'harm'" in err
+
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert [summary["model_version"] for summary in payload["summaries"]] == [
+        version.model_version for version in versions
+    ]
+    naive = next(
+        summary for summary in payload["summaries"] if summary["model_version"] == NAIVE_PERSIST_V1
+    )
+    stored_naive = stored[NAIVE_PERSIST_V1]
+    legacy_pairs = join_facts(stored_naive, source)
+    harm_pairs = join_facts(stored_naive, source, label_rule="harm")
+    # Факт по вреду действительно отличается от legacy — проверка не пустая.
+    assert any(a["fact_deficit"] != b["fact_deficit"] for a, b in zip(legacy_pairs, harm_pairs))
+    # F1 сводной стоит на harm-факте: горизонт → метрики совпадают с пересчётом.
+    assert naive["deficit"] == {
+        str(horizon): metrics for horizon, metrics in deficit_metrics(harm_pairs).items()
+    }
+    assert len(table.splitlines()) == 1 + len(versions)
 
 
 # ---------------------------------------------------------------------------

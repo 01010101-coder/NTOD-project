@@ -13,15 +13,19 @@
 же слота накануне (бакет ts − 24 ч). Оба горизонта контракта (15/30 минут)
 получают одно и то же значение — свойство семейства persistence/seasonal, а не
 недосмотр (design.md, «Open Questions»). Вероятность дефицита бинаризуется
-правилом контракта (:func:`ml.dataset.deficit_label`) в 0.0/1.0 — сознательная
-простота бейзлайна (design.md, Non-Goals). Нет исходного бакета — молчаливый
-пропуск пары: пустой список без исключений (спека «Вчерашнего слота нет»).
+правилом метки (:func:`ml.dataset.deficit_label`) в 0.0/1.0 — сознательная
+простота бейзлайна (design.md, Non-Goals). Правило выбирает вызывающий:
+``naive_persist`` принимает ``label_rule`` (``ml.deficit_label``; change
+``ml-harm-deficit-label``), сезонный наив остаётся на правиле контракта —
+требование спеки задаёт правило только для наива «как сейчас». Нет исходного
+бакета — молчаливый пропуск пары: пустой список без исключений (спека
+«Вчерашнего слота нет»).
 """
 
 from datetime import datetime
 
 from common.timeutil import add_minutes
-from ml.dataset import RET_HORIZONS_MIN, MetricPoint, RowSource, deficit_label
+from ml.dataset import RET_HORIZONS_MIN, DeficitRule, MetricPoint, RowSource, deficit_label
 
 NAIVE_PERSIST_V1 = "naive-persist-v1"
 """Версия наива «как сейчас» (persistence) в колонке ``model_version``."""
@@ -34,14 +38,21 @@ SEASON_LAG_MIN = 24 * 60
 
 
 def _forecast_rows(
-    model_version: str, ts: datetime, zone_id: int, point: MetricPoint
+    model_version: str,
+    ts: datetime,
+    zone_id: int,
+    point: MetricPoint,
+    label_rule: DeficitRule = "legacy",
 ) -> list[dict]:
     """Две dict-строки контракта ``forecasts``: одни и те же значения на 15/30.
 
     ``ts`` — момент прогноза (не целевой бакет: цель = ts + horizon_min);
-    ключи строк совпадают с параметрами ``insert_forecasts``.
+    ключи строк совпадают с параметрами ``insert_forecasts``; ``deficit_prob``
+    бинаризуется правилом ``label_rule``.
     """
-    deficit_prob = float(deficit_label(point.requests, point.free_drivers, point.unfulfilled))
+    deficit_prob = float(
+        deficit_label(point.requests, point.free_drivers, point.unfulfilled, rule=label_rule)
+    )
     return [
         {
             "ts": ts,
@@ -56,16 +67,19 @@ def _forecast_rows(
     ]
 
 
-def naive_persist(source: RowSource, ts: datetime, zone_id: int) -> list[dict]:
+def naive_persist(
+    source: RowSource, ts: datetime, zone_id: int, *, label_rule: DeficitRule = "legacy"
+) -> list[dict]:
     """Наив «как сейчас»: прогноз = метрики бакета ts той же зоны.
 
     Нет бакета ts — пустой список (та же конвенция молчаливого пропуска, что
-    и у сезонного наива).
+    и у сезонного наива). ``deficit_prob`` — правило ``label_rule``
+    (``ml.deficit_label``): при ``harm`` — только ``unfulfilled > 0``.
     """
     point = source.metrics_at(zone_id, ts)
     if point is None:
         return []
-    return _forecast_rows(NAIVE_PERSIST_V1, ts, zone_id, point)
+    return _forecast_rows(NAIVE_PERSIST_V1, ts, zone_id, point, label_rule)
 
 
 def naive_season(source: RowSource, ts: datetime, zone_id: int) -> list[dict]:
