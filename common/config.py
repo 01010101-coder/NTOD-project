@@ -515,6 +515,11 @@ class MlCfg(_CfgBase):
     config.yaml, как ``dest_decay_min`` после m2-calibration);
     гиперпараметры обучения заводятся один раз на все changes вехи M3.
 
+    ``artifacts_root`` — корень артефактов M3 и калибровок (change
+    ``world-final-config``): изолирует миры друг от друга, чтобы сети
+    финального мира не становились «свежайшими» для эталонного. Дефолт
+    ``artifacts`` совпадает с прежней константой ``ml.train.ARTIFACTS_ROOT``.
+
     ``deficit_label`` — правило метки дефицита ML-контура (change
     ``ml-harm-deficit-label``): ``legacy`` — правило контракта данных
     (``free_drivers / max(requests, 1) < 0.5`` или ``unfulfilled > 0``,
@@ -524,6 +529,7 @@ class MlCfg(_CfgBase):
     """
 
     db: str = "data/m3_epoch.db"
+    artifacts_root: str = "artifacts"
     train_days: int = 30
     val_days: int = 2
     test_days: int = 7

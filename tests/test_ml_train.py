@@ -530,3 +530,16 @@ def test_val_mae_requests_physical_scale(pattern_db: Path) -> None:
     raw_spread = float(data.raw_requests["val"].max() - data.raw_requests["val"].min())
     mae = val_mae_requests(result.model, data)
     assert 0.0 <= mae <= raw_spread
+
+
+def test_cli_train_uses_ml_artifacts_root(cli_env: Path, tmp_path: Path) -> None:
+    """Корень ``ml.artifacts_root`` изолирует артефакты мира (1.1, сценарий спеки)."""
+
+    root = tmp_path / "artifacts-final"
+    config = _write_config(
+        tmp_path, tmp_path / "pattern.db", name="final.yaml", artifacts_root=str(root)
+    )
+    rc = main(["train", "--config", str(config), "--arch", "mlp"])
+    assert rc == 0
+    assert (root / model_version_for("mlp")).is_dir()
+    assert not (tmp_path / "artifacts").exists()  # дефолтный корень не тронут

@@ -38,7 +38,6 @@ from ml.planning import (
     train_planning,
 )
 from ml.train import (
-    ARTIFACTS_ROOT,
     model_version_for,
     prepare_training_data,
     save_model_artifacts,
@@ -128,7 +127,11 @@ def _epoch_printer(arch: str, max_epochs: int) -> Callable[[int, float, float, i
 
 def _run_train(args: argparse.Namespace) -> int:
     """Подкоманда train: guard'ы (БД, занятые каталоги — все сразу до обучения)
-    → подготовка данных один раз → обучение и запись по архитектурам."""
+    → подготовка данных один раз → обучение и запись по архитектурам.
+
+    Каталоги версий пишутся в корень ``ml.artifacts_root`` конфига (change
+    ``world-final-config``); дефолт ``artifacts`` сохраняет прежние пути.
+    """
 
     cfg = load_config(args.config)
     db_path = args.db if args.db is not None else cfg.ml.db
@@ -137,7 +140,8 @@ def _run_train(args: argparse.Namespace) -> int:
         return 2
 
     archs: tuple[str, ...] = ("mlp", "lstm") if args.arch == "both" else (args.arch,)
-    model_dirs = {arch: ARTIFACTS_ROOT / model_version_for(arch) for arch in archs}
+    root = Path(cfg.ml.artifacts_root)
+    model_dirs = {arch: root / model_version_for(arch) for arch in archs}
     for model_dir in model_dirs.values():
         if model_dir.exists():
             print(
@@ -214,8 +218,9 @@ def _run_sweep(args: argparse.Namespace) -> int:
         return 2
 
     winner = min(rows, key=lambda row: float(row["val_mae_requests"]))
-    ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
-    with open(ARTIFACTS_ROOT / "window-sweep.json", "w", encoding="utf-8") as fh:
+    root = Path(cfg.ml.artifacts_root)
+    root.mkdir(parents=True, exist_ok=True)
+    with open(root / "window-sweep.json", "w", encoding="utf-8") as fh:
         json.dump(
             {"windows": rows, "winner": winner["window_hours"]}, fh, ensure_ascii=False, indent=2
         )
@@ -241,15 +246,14 @@ def _run_infer(args: argparse.Namespace) -> int:
         source = SqliteRowSource(db_path)
         conn = connect(str(db_path))
         try:
-            versions = run_inference(
-                source, conn, cfg=cfg, models=args.models, artifacts_root=ARTIFACTS_ROOT
-            )
+            root = Path(cfg.ml.artifacts_root)
+            versions = run_inference(source, conn, cfg=cfg, models=args.models, artifacts_root=root)
             summary_path, table = summarize_run(
                 conn,
                 source,
                 versions,
                 label_rule=cfg.ml.deficit_label,
-                artifacts_root=ARTIFACTS_ROOT,
+                artifacts_root=root,
             )
         finally:
             conn.close()

@@ -273,7 +273,7 @@ def run_inference(
     *,
     cfg: AppConfig,
     models: str = "all",
-    artifacts_root: str | Path = ARTIFACTS_ROOT,
+    artifacts_root: str | Path | None = None,
 ) -> list[InferredVersion]:
     """Прогон версий по тест-эпохе (задачи 3.1/3.3): набор семейств → список
     записанных версий с числом строк.
@@ -290,6 +290,8 @@ def run_inference(
     наивы) стоят на одной метке. Расхождение со снимком артефакта не ошибка
     (сравнить старую ``legacy``-сеть на ``harm``-факте осмысленно), но CLI
     печатает предупреждение с версией и обоими правилами в stderr и продолжает.
+    ``artifacts_root=None`` — корень ``ml.artifacts_root`` конфига (дефолт
+    ``artifacts`` сохраняет прежние пути).
     """
 
     if models not in _FAMILY_SETS:
@@ -300,6 +302,7 @@ def run_inference(
     zones = [zone.id for zone in cfg.city.zones]
     n_zones = max(zones) + 1
     start = world_start(cfg)
+    root = Path(cfg.ml.artifacts_root) if artifacts_root is None else Path(artifacts_root)
 
     # Guard каталогов всех сетевых семейств сразу — до сбора примеров и записи.
     dirs: dict[str, Path] = {}
@@ -308,7 +311,7 @@ def run_inference(
         if family == "naive":
             continue
         try:
-            dirs[family] = latest_artifact_dir(artifacts_root, family)
+            dirs[family] = latest_artifact_dir(root, family)
         except FileNotFoundError as exc:
             missing.append(str(exc))
     if missing:

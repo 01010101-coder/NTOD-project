@@ -1,0 +1,158 @@
+# Финальный мир проекта (change world-final-config): все пять механизмов
+# включены, цель обучения — вред (deficit_label: harm), рычаг — канал both.
+# Значения подобраны в notebooks/start_conditions.ipynb §9–§12 (решение 3
+# design.md, критерии 1–3 на трёх seed 42/7/2026). Эталонный config.yaml не
+# меняется; мир изолирован в data/final/ и artifacts/final/.
+
+seed: 42
+
+storage:
+  db_path: data/final/taxi.db
+
+city:
+  zones:
+    - {id: 0, name: sleep-1, archetype: residential, attract_origin: 1.0, attract_dest: 0.6, map: {x: 180, y: 180}}
+    - {id: 1, name: sleep-2, archetype: residential, attract_origin: 1.0, attract_dest: 0.6, map: {x: 820, y: 180}}
+    - {id: 2, name: center,   archetype: business,   attract_origin: 1.3, attract_dest: 1.8, map: {x: 500, y: 400}}
+    - {id: 3, name: office,   archetype: business,   attract_origin: 1.2, attract_dest: 1.5, map: {x: 500, y: 620}}
+    - {id: 4, name: airport,  archetype: airport,    attract_origin: 0.6, attract_dest: 1.2, map: {x: 900, y: 620}}
+    - {id: 5, name: lounge,   archetype: mixed,      attract_origin: 1.1, attract_dest: 1.4, map: {x: 180, y: 620}}
+  roads:   # двунаправленные рёбра, минуты
+    - {from_zone: 0, to_zone: 2, minutes: 9}
+    - {from_zone: 1, to_zone: 2, minutes: 9}
+    - {from_zone: 2, to_zone: 3, minutes: 6}
+    - {from_zone: 3, to_zone: 4, minutes: 10}
+    - {from_zone: 2, to_zone: 5, minutes: 8}
+    - {from_zone: 0, to_zone: 5, minutes: 5}
+    - {from_zone: 1, to_zone: 4, minutes: 14}
+  # матрица path_min считается при старте (Флойд), не хранится
+
+population: {scale: 1.0}
+
+demand:
+  base_rate: 2.0        # заказов/мин на зону до всех множителей
+  dest_decay_min: 12
+  shocks:               # скрытый множитель спроса зоны (change world-demand-shocks)
+    enabled: true       # финальный мир: шоки включены (ноутбук §11)
+    city_sigma: 0.12    # стационарное σ логарифма городской компоненты
+    city_tau_min: 240   # время корреляции городской компоненты, минут
+    zone_sigma: 0.10    # стационарное σ логарифма компоненты зоны
+    zone_tau_min: 120   # время корреляции компоненты зоны, минут
+    day_sigma: 0.08     # σ суточной компоненты (уровень дня)
+  profiles:             # 24 множителя на час 00–23; будни и выходные отдельно, на архетип
+    residential:
+      weekday: [0.1, 0.08, 0.07, 0.07, 0.07, 0.1, 0.2, 0.35, 0.42, 0.35, 0.28, 0.25, 0.25, 0.25, 0.25, 0.28, 0.32, 0.38, 0.42, 0.38, 0.35, 0.32, 0.2, 0.14]
+      weekend:  [0.14, 0.12, 0.1, 0.08, 0.08, 0.1, 0.18, 0.25, 0.32, 0.35, 0.38, 0.38, 0.38, 0.38, 0.38, 0.38, 0.42, 0.45, 0.5, 0.45, 0.42, 0.38, 0.28, 0.2]
+    business:
+      weekday: [0.2, 0.15, 0.12, 0.12, 0.15, 0.25, 0.45, 0.6, 0.7, 0.65, 0.55, 0.55, 0.55, 0.55, 0.55, 0.6, 0.7, 1.0, 1.3, 1.4, 1.35, 1.2, 0.7, 0.4]
+      weekend:  [0.25, 0.2, 0.15, 0.15, 0.15, 0.2, 0.3, 0.4, 0.5, 0.55, 0.6, 0.6, 0.6, 0.6, 0.6, 0.65, 0.75, 0.9, 1.0, 1.05, 1.0, 0.9, 0.6, 0.4]
+    airport:
+      weekday: [0.5, 0.5, 0.5, 0.55, 0.55, 0.6, 0.65, 0.7, 0.7, 0.7, 0.65, 0.6, 0.6, 0.6, 0.6, 0.6, 0.65, 0.7, 0.75, 0.8, 0.8, 0.75, 0.65, 0.55]
+      weekend:  [0.55, 0.5, 0.5, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.75, 0.7, 0.65, 0.65, 0.65, 0.65, 0.65, 0.7, 0.75, 0.8, 0.8, 0.8, 0.7, 0.65, 0.6]
+    mixed:
+      weekday: [0.3, 0.25, 0.2, 0.2, 0.2, 0.25, 0.35, 0.45, 0.55, 0.55, 0.55, 0.55, 0.55, 0.6, 0.6, 0.65, 0.75, 0.9, 1.0, 1.05, 1.1, 1.0, 0.8, 0.5]
+      weekend:  [0.35, 0.3, 0.25, 0.25, 0.25, 0.3, 0.4, 0.5, 0.6, 0.65, 0.65, 0.65, 0.65, 0.7, 0.7, 0.75, 0.85, 0.95, 1.05, 1.1, 1.15, 1.05, 0.85, 0.6]
+
+drivers:
+  count: 250
+  wait_limit_min: 6
+  shifts:                       # смены водителей (change world-driver-shifts)
+    enabled: true               # финальный мир: смены включены (ноутбук §12)
+    online_share:               # доля парка на смене по часам 00–23 (24 значения)
+      weekday: [0.40, 0.35, 0.33, 0.33, 0.33, 0.40, 0.55, 0.70, 0.80, 0.80, 0.75, 0.70, 0.70, 0.70, 0.70, 0.75, 0.80, 0.85, 0.85, 0.80, 0.72, 0.65, 0.55, 0.45]
+      weekend: [0.50, 0.45, 0.40, 0.35, 0.33, 0.33, 0.40, 0.50, 0.60, 0.65, 0.70, 0.70, 0.70, 0.70, 0.70, 0.72, 0.75, 0.80, 0.80, 0.78, 0.72, 0.68, 0.62, 0.55]
+  reposition:                   # отклик предложения на тариф (change m6-supply-response)
+    enabled: true               # финальный мир: отклик предложения (ноутбук §12)
+    every_min: 5                # период решений, минут
+    min_gain: 0.10              # минимальный прирост тарифа для переезда
+    sensitivity: 1.0            # доля свободных на единицу прироста
+    max_share: 0.3              # потолок доли уезжающих из зоны
+    max_reach_min: 12           # максимальный путь до цели, минут
+  dispatch:                     # радиус поиска и отказ пассажира (change world-dispatch-radius)
+    max_pickup_min: 12          # радиус подачи, минут (ноутбук §12)
+    cancel_grace_min: 5         # терпимая подача без риска отказа, минут
+    cancel_prob_per_min: 0.06   # прирост вероятности отказа за минуту сверх терпения
+    cancel_max_prob: 0.9        # потолок вероятности отказа
+  callout:                      # вызов подработчиков (change world-elastic-supply)
+    enabled: true               # финальный мир: вызов подработчиков (ноутбук §12)
+    part: 60                    # подработчиков сверх drivers.count, только по вызову
+    lag_min: 60                 # минут от решения до выхода на линию (ноутбук §11)
+    session_min: 120            # минут на линии после выхода
+    every_min: 5                # период решений о вызове, минут
+    min_gain: 0.10              # минимальный прирост сигнала водителям над 1.0
+    sensitivity: 0.3            # доля свободного резерва на единицу прироста
+    max_share: 0.3              # потолок доли резерва на одну зону
+
+weather:
+  rain_day_chance: 0.15
+  episode_start_h: [6, 22]      # U(6:00–22:00)
+  episode_duration_h: [1, 3]
+  demand_mult: 1.4
+  travel_mult: 1.4
+
+events:
+  friday_evening:
+    days: [4, 5]                # пт, сб (нумерация с понедельника = 0)
+    hours: [17, 23]             # диапазон включительно
+    archetypes: [business, mixed]
+    demand_mult: 1.3
+
+pricing:
+  elasticity_alpha: 0.5
+  base_boarding: 100.0          # руб., формула выручки §10.15
+  per_min_rub: 12.0
+  surge_injection:
+    day_chance: 0.10
+    duration_min: [30, 60]
+    multiplier: [1.2, 1.6]
+
+engine:
+  agg_step_min: 5
+  sim_start: "2026-11-02"       # понедельник, старт сим-часов 00:00
+
+app:                            # сервер воспроизведения (change replay-server)
+  host: 127.0.0.1
+  port: 8000
+  days: 30                      # дни прогона лога при старте сервера
+
+ml:                             # приложение А плана M3 (change m3-dataset)
+  db: data/final/m3_epoch.db          # БД единой эпохи (37-дневный прогон мира)
+  train_days: 30                # обучающая эпоха (дни 1–30)
+  val_days: 2                   # ранняя остановка (дни 29–30, хвост train)
+  test_days: 7                  # тест-эпоха = продолжение (дни 31–37)
+  window_hours: 3               # окно истории признаков; победитель свипа 3/6/12 (MAE 1.806 против 1.848/1.843)
+  zone_embed_dim: 8
+  mlp_hidden: [256, 128]
+  lstm_hidden: 64
+  lstm_layers: 1
+  dropout: 0.1
+  lr: 0.001
+  batch_size: 256
+  max_epochs: 100
+  patience: 8
+  cls_weight: 1.0               # вес BCE в общем loss
+  seed: 42                      # отдельный от мира seed обучения
+  deficit_label: harm           # метка ML-контура: учимся на вреде (ноутбук §12)
+  artifacts_root: artifacts/final  # корень артефактов финального мира
+  planning:                     # прогноз вреда для планирования (change ml-planning-forecast)
+    horizons_min: [60, 120]     # горизонты упреждения, минут (кратны 5, [15, 240])
+    window_min: 30              # окно цели: вред хотя бы в одном бакете окна
+    artifacts_root: artifacts/final/planning  # отдельный корень финального мира
+
+policy:                         # ценовые политики (change m6-policy; прил. А плана M5+M6)
+  horizon_min: 15               # лучший test-F1; фиксируется до генерации веток
+  stairs:                       # p_eff = clip(deficit_prob + shift[model], 0, 1)
+    - {p_min: 0.80, mult: 1.50}
+    - {p_min: 0.60, mult: 1.30}
+    - {p_min: 0.40, mult: 1.15}
+  total_cap: 2.0                # итог = тариф_мира × множитель, потолок суммарного тарифа
+  reactive_mult: 1.30           # ветка B: дефицит сейчас → ×1.30
+  shift: {mlp: -0.344, lstm: -0.312}  # δ-калибровка частоты срабатываний
+  target_fire_rate: 0.10        # цель: ступень активна в ~10 % зон-моментов
+  worlds_dir: data/final/worlds # реестр веток финального мира
+  channel: both                 # рычаг политики: цена пассажиру + сигнал водителям (ноутбук §12)
+  signal:                       # сигнал водителям (change policy-driver-signal)
+    horizon_min: 60             # горизонт сети планирования, минут (кратен 5, > 0)
+    mult: 1.30                  # единственная ступень сигнала (> 1.0)
+    target_fire_rate: 0.15      # цель калибровки порога: доля срабатываний (0, 1)
+    threshold: {mlp: 0.781, lstm: 0.750}  # порог вероятности вреда по семействам, [0, 1]

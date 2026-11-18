@@ -6,11 +6,14 @@
 
 - :func:`test_window` — полуинтервал тест-недели
   ``[world_start + ml.train_days, + ml.test_days)`` по ``created_at``/``ts``;
-- :func:`branch_outcomes` — исходы одной ветки: завершённые и невыполненные
-  заказы, среднее ожидание подачи (``pickup_at − created_at`` завершённых, а не
-  ``avg_wait_min`` агрегатов — это ожидание назначения, design решение 2),
-  выручка по формуле §10.15 M2, доля дефицитных зона-бакетов (правило
-  контракта, design решение 3) и часовой ряд кумулятивной выручки;
+- :func:`branch_outcomes` — исходы одной ветки: завершённые, невыполненные и
+  отменённые заказы (``unserved`` = истёкшие + отказы), ``deterred``/``saved``
+  относительно A, среднее ожидание подачи (``pickup_at − created_at``
+  завершённых, а не ``avg_wait_min`` агрегатов — это ожидание назначения,
+  design решение 2), выручка по формуле §10.15 M2, доля дефицитных
+  зона-бакетов (правило контракта, design решение 3), переключения тарифа на
+  зону в сутки, часы вызванных водителей из ``meta.json`` и часовой ряд
+  кумулятивной выручки;
 - :func:`accuracy_vs_base` — MAE спроса и precision/recall/F1 дефицита
   тень-моделей ``mlp``/``lstm`` **против факта ветки A** (design решение 6):
   факт B/C/D искажён действием политики (self-fulfilling prophecy);
@@ -23,6 +26,7 @@
 спеки «Ветка без БД» и «Ни одной БД».
 """
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import datetime, timedelta
@@ -47,8 +51,26 @@ SHADOW_FAMILIES = ("mlp", "lstm")
 SHADOW_HORIZONS = (15, 30)
 """Горизонты прогноза контракта данных, по которым считается точность."""
 
-OUTCOME_KEYS = ("trips", "unfulfilled", "avg_wait_min", "revenue", "deficit_share")
-"""Поля исходов ветки — по ним же строятся дельты к A."""
+ABSOLUTE_OUTCOMES = (
+    "trips",
+    "unfulfilled",
+    "cancelled",
+    "unserved",
+    "avg_wait_min",
+    "revenue",
+    "deficit_share",
+    "price_switches",
+    "callout_hours",
+)
+"""Абсолютные исходы ветки — по ним строятся дельты к A (спека, change
+``world-final-config``): ``unserved = unfulfilled + cancelled``, переключения
+цены и часы вызова абсолютны и сравнимы между ветками."""
+
+RELATIVE_OUTCOMES = ("deterred", "saved")
+"""Исходы, уже относительные к A (отпугнуто/спасено): дельт не имеют."""
+
+OUTCOME_KEYS = ABSOLUTE_OUTCOMES + RELATIVE_OUTCOMES
+"""Все исходы записи ветки в ответе ``GET /api/ml/compare``."""
 
 
 class CompareWindow(NamedTuple):
@@ -98,11 +120,52 @@ def _empty_outcomes(hours: int) -> dict:
     return {
         "trips": 0,
         "unfulfilled": 0,
+        "cancelled": 0,
+        "unserved": 0,
         "avg_wait_min": None,
         "revenue": 0.0,
         "deficit_share": None,
+        "price_switches": None,
+        "callout_hours": None,
+        "deterred": None,
+        "saved": None,
         "revenue_series": [0.0] * max(hours, 0),
     }
+
+
+def meta_path(db: str | Path) -> Path:
+    """Путь метаданных ветки: ``<имя БД без .db>.meta.json`` рядом с БД."""
+
+    path = Path(db)
+    return path.parent / f"{path.stem}.meta.json"
+
+
+def read_branch_meta(db: str | Path) -> dict | None:
+    """Метаданные ветки (``channel``, часы вызова) или ``None``.
+
+    Сетка до change'а ``policy-driver-signal`` метаданных не имеет — их
+    отсутствие не ошибка: поля ответа становятся ``null`` (сценарий спеки).
+    """
+
+    path = meta_path(db)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _callout_hours(meta: dict | None) -> float | None:
+    """Часы вызванных подработчиков тест-недели из ``meta.json`` (``null`` без поля)."""
+
+    if meta is None:
+        return None
+    minutes = meta.get("callout_minutes_test")
+    if minutes is None:
+        return None
+    return float(minutes) / 60.0
 
 
 def _trip_counts(conn: sqlite3.Connection, status: str, window: CompareWindow) -> int:
@@ -150,6 +213,35 @@ def _deficit_share(conn: sqlite3.Connection, window: CompareWindow) -> float | N
     if not total:
         return None
     return int(row[1] or 0) / total
+
+
+def _price_switches(
+    conn: sqlite3.Connection, window: CompareWindow, n_zones: int, days: int
+) -> float | None:
+    """Переключения тарифа на зону в сутки (change ``world-final-config``).
+
+    Смена — разница ``price_multiplier`` между соседними бакетами одной зоны
+    окна (строки упорядочены по зоне и ``ts``). Делится на (число зон × число
+    суток окна); ``None`` — строк метрик в окне нет. В счёт входят и
+    инъекции тарифа мира: база A даёт «фон» переключений.
+    """
+
+    rows = conn.execute(
+        "SELECT zone_id, price_multiplier FROM zone_metrics_5min"
+        " WHERE ts >= ? AND ts < ? ORDER BY zone_id, ts",
+        (to_iso(window.start), to_iso(window.end)),
+    ).fetchall()
+    if not rows:
+        return None
+    switches = 0
+    previous_zone: int | None = None
+    previous_mult: float | None = None
+    for zone_id, multiplier in rows:
+        if zone_id == previous_zone and multiplier != previous_mult:
+            switches += 1
+        previous_zone, previous_mult = int(zone_id), float(multiplier)
+    denominator = max(n_zones, 1) * max(days, 1)
+    return switches / denominator
 
 
 def _revenue_and_series(
@@ -204,30 +296,49 @@ def branch_outcomes(
 ) -> dict:
     """Исходы одной ветки за окно тест-недели (design решения 2–4).
 
-    Возвращает ``trips``, ``unfulfilled``, ``avg_wait_min``, ``revenue``,
-    ``deficit_share`` и ``revenue_series`` (``ml.test_days × 24`` точек
-    кумулятивной выручки). Нет файла, пустая или чужая БД — нули и ``null``
-    без исключений; соединение read-only, файл мира не меняется.
+    Возвращает абсолютные исходы ``trips``, ``unfulfilled``, ``cancelled``,
+    ``unserved`` (= истёкшие + отказы), ``avg_wait_min``, ``revenue``,
+    ``deficit_share``, ``price_switches``, ``callout_hours`` (из ``meta.json``;
+    ``null`` без файла), заглушки относительных ``deterred``/``saved``
+    (заполняет :func:`build_compare` по ветке A) и ``revenue_series``
+    (``ml.test_days × 24`` точек кумулятивной выручки). Нет файла, пустая или
+    чужая БД — нули и ``null`` без исключений; соединение read-only, файл мира
+    не меняется.
     """
 
     hours = cfg.ml.test_days * 24
+    callout_hours = _callout_hours(read_branch_meta(db))
     conn = _connect_ro(db)
     if conn is None:
-        return _empty_outcomes(hours)
+        empty = _empty_outcomes(hours)
+        empty["callout_hours"] = callout_hours
+        return empty
     try:
         if not _has_tables(conn, ("trips", "zone_metrics_5min")):
-            return _empty_outcomes(hours)
+            empty = _empty_outcomes(hours)
+            empty["callout_hours"] = callout_hours
+            return empty
         revenue, series = _revenue_and_series(conn, cfg, path_min, window, hours)
+        unfulfilled = _trip_counts(conn, "unfulfilled", window)
+        cancelled = _trip_counts(conn, "cancelled", window)
         return {
             "trips": _trip_counts(conn, "completed", window),
-            "unfulfilled": _trip_counts(conn, "unfulfilled", window),
+            "unfulfilled": unfulfilled,
+            "cancelled": cancelled,
+            "unserved": unfulfilled + cancelled,
             "avg_wait_min": _avg_wait_min(conn, window),
             "revenue": revenue,
             "deficit_share": _deficit_share(conn, window),
+            "price_switches": _price_switches(conn, window, len(cfg.city.zones), cfg.ml.test_days),
+            "callout_hours": callout_hours,
+            "deterred": None,
+            "saved": None,
             "revenue_series": series,
         }
     except sqlite3.Error:
-        return _empty_outcomes(hours)
+        empty = _empty_outcomes(hours)
+        empty["callout_hours"] = callout_hours
+        return empty
     finally:
         conn.close()
 
@@ -347,21 +458,32 @@ def _delta(value: float | None, base: float | None) -> float | None:
 
 
 def _deltas(outcomes: dict, base: dict | None) -> dict:
-    """Дельты всех исходов ветки к исходам A (``null`` без базы)."""
+    """Дельты абсолютных исходов ветки к A; у относительных — ``null``.
 
-    if base is None:
-        return dict.fromkeys(OUTCOME_KEYS)
-    return {key: _delta(outcomes.get(key), base.get(key)) for key in OUTCOME_KEYS}
+    ``None`` у всех ключей без базы; ``deterred``/``saved`` уже относительны к
+    A, поэтому дельт не имеют (спека ``web-compare-tab``).
+    """
+
+    result: dict = {}
+    for key in ABSOLUTE_OUTCOMES:
+        result[key] = None if base is None else _delta(outcomes.get(key), base.get(key))
+    for key in RELATIVE_OUTCOMES:
+        result[key] = None
+    return result
 
 
 def build_compare(cfg: AppConfig, worlds_dir: str | Path | None = None) -> dict:
     """Собрать ответ сравнения веток (design решения 1, 5, 8).
 
     Ветки идут в порядке реестра ``list_worlds`` (A, B, C, D); отсутствующая БД
-    даёт ``exists=false``, ``null``-исходы и ``null``-дельты. Дельты считаются
-    только для существующей базы A (у самой A — ``null``). Раздел точности —
-    всегда против факта A; без A он пуст. Форма ответа фиксирована спекой
-    ``web-compare-tab``; сервер кэширует результат по сигнатурам файлов БД.
+    даёт ``exists=false``, ``null``-исходы и ``null``-дельты. У существующей
+    ветки ``channel`` — из ``meta.json`` (``null`` у старой сетки без метаданных),
+    ``deterred`` = поездки A − поездки ветки, ``saved`` = необслуженные A −
+    необслуженные ветки (у A — 0). Дельты считаются только для абсолютных
+    исходов и только при существующей базе A (у самой A — ``null``). Раздел
+    точности — всегда против факта A; без A он пуст. Форма ответа фиксирована
+    спекой ``web-compare-tab``; сервер кэширует результат по сигнатурам файлов
+    БД.
     """
 
     window = test_window(cfg)
@@ -378,6 +500,7 @@ def build_compare(cfg: AppConfig, worlds_dir: str | Path | None = None) -> dict:
                     "name": info.name,
                     "label": info.label,
                     "exists": False,
+                    "channel": None,
                     "outcomes": dict.fromkeys(OUTCOME_KEYS),
                     "delta": dict.fromkeys(OUTCOME_KEYS),
                     "revenue_series": None,
@@ -385,12 +508,15 @@ def build_compare(cfg: AppConfig, worlds_dir: str | Path | None = None) -> dict:
             )
             continue
         raw = branch_outcomes(info.db, cfg, path_min, window)
-        outcomes = {key: raw[key] for key in OUTCOME_KEYS}
+        meta = read_branch_meta(info.db)
+        outcomes = {key: raw[key] for key in ABSOLUTE_OUTCOMES}
+        outcomes.update(dict.fromkeys(RELATIVE_OUTCOMES))
         branches.append(
             {
                 "name": info.name,
                 "label": info.label,
                 "exists": True,
+                "channel": None if meta is None else meta.get("channel"),
                 "outcomes": outcomes,
                 "delta": None,  # заполняется после сбора базы A
                 "revenue_series": raw["revenue_series"],
@@ -401,6 +527,20 @@ def build_compare(cfg: AppConfig, worlds_dir: str | Path | None = None) -> dict:
             base_db = info.db
 
     for branch in branches:
+        if not branch["exists"]:
+            branch["delta"] = dict.fromkeys(OUTCOME_KEYS)
+            continue
+        if base_outcomes is not None:
+            branch["outcomes"]["deterred"] = (
+                0
+                if branch["name"] == BASE_BRANCH
+                else base_outcomes["trips"] - branch["outcomes"]["trips"]
+            )
+            branch["outcomes"]["saved"] = (
+                0
+                if branch["name"] == BASE_BRANCH
+                else base_outcomes["unserved"] - branch["outcomes"]["unserved"]
+            )
         if branch["name"] == BASE_BRANCH:
             branch["delta"] = dict.fromkeys(OUTCOME_KEYS)
         else:

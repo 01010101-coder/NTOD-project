@@ -602,7 +602,7 @@ def create_app(
     seed: int | None = None,
     days: float | None = None,
     tick_interval: float | None = TICK_INTERVAL_SEC,
-    artifacts_dir: Path = Path("artifacts"),
+    artifacts_dir: Path | None = None,
     worlds_dir: str | Path | None = None,
 ) -> FastAPI:
     """Собрать FastAPI-приложение сервера (задачи 4.1–4.4, 5.1–5.4; m6-worlds-ui).
@@ -612,8 +612,9 @@ def create_app(
     тесты двигают playhead вручную через ``app.state.replay.tick``;
     production-запуск (``app/__main__.py``) использует тик по умолчанию.
     ``artifacts_dir`` — каталог артефактов обучения для ``/api/ml/*``:
-    дефолт — cwd-конвенция CLI ``python -m ml train``; тесты подставляют
-    tmp_path (design.md m3-ml-tab, решение 1). БД эпохи читается из
+    ``None`` — корень ``ml.artifacts_root`` конфига (change
+    ``world-final-config``; дефолт ``artifacts`` сохраняет прежние пути), тесты
+    подставляют tmp_path (design.md m3-ml-tab, решение 1). БД эпохи читается из
     ``cfg.ml.db`` (change ``m3-dataset``). Change ``m6-worlds-ui``: стартовый
     мир — «Эпоха» длиной ``ml.train_days + ml.test_days`` суток (``days``
     переопределяет, в т.ч. для тестов), ветки реестра строятся лениво при
@@ -623,6 +624,7 @@ def create_app(
     seed = cfg.seed if seed is None else seed
     days = cfg.ml.train_days + cfg.ml.test_days if days is None else days
     sim_start = from_iso(f"{cfg.engine.sim_start} 00:00:00")
+    artifacts_root = Path(cfg.ml.artifacts_root) if artifacts_dir is None else Path(artifacts_dir)
 
     def build_world(name: str, label: str) -> WorldState:
         """Собрать мир: лог + контроллер + фоновый прогон правила ветки/Эпохи.
@@ -759,7 +761,7 @@ def create_app(
             naive = [{"model_version": row["model_version"], "kind": "naive"} for row in rows]
 
         networks: list[dict] = []
-        root = Path(artifacts_dir)
+        root = artifacts_root
         if root.is_dir():
             for metrics_path in sorted(root.glob("*/metrics.json")):
                 try:
@@ -798,7 +800,7 @@ def create_app(
         он не читается — 404 с понятным сообщением.
         """
 
-        root = Path(artifacts_dir)
+        root = artifacts_root
         candidates = sorted(root.glob("summary-*.json")) if root.is_dir() else []
         if not candidates:
             raise HTTPException(

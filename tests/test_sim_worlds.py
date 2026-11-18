@@ -519,3 +519,33 @@ def test_worlds_warmup_bit_identical(tmp_path: Path, mini_artifacts: Path) -> No
     finally:
         for conn in conns.values():
             conn.close()
+
+
+def test_branch_uses_ml_artifacts_root(
+    tmp_path: Path, mini_artifacts: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Контур ветки берёт корень из `ml.artifacts_root`, а не из константы (1.1).
+
+    Сценарий спеки «Отдельный корень изолирует миры»: константа указывает на
+    пустой каталог, а конфиг — на подготовленные мини-артефакты. Ветка с
+    отдельным корнем строится, ветка с дефолтным конфигом артефактов не находит.
+    """
+
+    monkeypatch.setattr(branches_module, "ARTIFACTS_ROOT", tmp_path / "empty")
+    base = _policy_world_config()
+    isolated = base.model_copy(
+        update={"ml": base.ml.model_copy(update={"artifacts_root": str(mini_artifacts)})}
+    )
+    db = tmp_path / "isolated.db"
+    summary = generate_branch("c-mlp", isolated, seed=SEED, days=2, db_path=str(db), shadow=False)
+    assert summary is not None
+
+    with pytest.raises(FileNotFoundError, match="mlp"):
+        generate_branch(
+            "c-mlp",
+            base,
+            seed=SEED,
+            days=2,
+            db_path=str(tmp_path / "default.db"),
+            shadow=False,
+        )

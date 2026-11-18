@@ -127,6 +127,18 @@ def _reactive_contours(cfg: AppConfig) -> ContourPair:
     return price, signal
 
 
+def _artifacts_root(cfg: AppConfig) -> Path:
+    """Корень артефактов M3 ветки: ``ml.artifacts_root`` конфига.
+
+    Дефолт ``artifacts`` совпадает с константой модуля ``ARTIFACTS_ROOT``; сама
+    константа остаётся точкой подмены в тестах, поэтому при дефолтном значении
+    возвращается она (а не равный ей путь).
+    """
+
+    configured = Path(cfg.ml.artifacts_root)
+    return ARTIFACTS_ROOT if configured == Path("artifacts") else configured
+
+
 def _stair_contours_factory(family: str) -> Callable[[AppConfig], ContourPair]:
     """Фабрика контуров веток C/D по каналу для семейства ``family``.
 
@@ -143,10 +155,11 @@ def _stair_contours_factory(family: str) -> Callable[[AppConfig], ContourPair]:
     def factory(cfg: AppConfig) -> ContourPair:
         step = cfg.engine.agg_step_min
         channel = cfg.policy.channel
+        root = _artifacts_root(cfg)
         price: PolicyContour | None = None
         if channel in ("price", "both"):
             source = LiveRowSource(agg_step_min=step)
-            predictor = NetworkPredictor(source, cfg, family=family, artifacts_root=ARTIFACTS_ROOT)
+            predictor = NetworkPredictor(source, cfg, family=family, artifacts_root=root)
             price = PolicyContour(cfg, predictor, source, model=family)
         signal: PolicyContour | None = None
         if channel in ("heatmap", "both"):
@@ -327,7 +340,7 @@ def generate_branch(
         # Guard обоих семейств — у любой ветки реестра, до старта прогона;
         # flush на закрытый бакет — буфер строк тени в forecasts БД ветки.
         shadow_caster = ShadowForecaster(
-            cfg, artifacts_root=ARTIFACTS_ROOT, flush=partial(insert_forecasts, conn)
+            cfg, artifacts_root=_artifacts_root(cfg), flush=partial(insert_forecasts, conn)
         )
     cost = _TestWindowCostObserver(cfg) if cfg.drivers.callout.enabled else None
     engine = Engine(

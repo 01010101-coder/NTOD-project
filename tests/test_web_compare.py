@@ -12,6 +12,7 @@
 часовой ряд — 24 точки. Мир синтетический (2 зоны, дорога 30 мин).
 """
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -540,6 +541,7 @@ def test_api_compare_response(tmp_path):
         "name",
         "label",
         "exists",
+        "channel",
         "outcomes",
         "delta",
         "revenue_series",
@@ -630,6 +632,22 @@ def test_static_compare_tab(tmp_path):
     assert "политика меняет факт" in page
     assert "self-fulfilling prophecy" in page
 
+    # Девять колонок исходов и канал ветки (change world-final-config).
+    for title in (
+        "поездки",
+        "не обслужено",
+        "отпугнуто",
+        "спасено",
+        "переключения цены",
+        "часы вызванных водителей",
+        "доля дефицита",
+        "канал",
+    ):
+        assert title in script, f"нет заголовка колонки {title}"
+    assert "branch.channel" in script  # канал из meta.json в строке ветки
+    assert "'better': 'more'" in script or "better: 'more'" in script  # правило подсветки
+    assert "branch.delta?.[column.key]" in script  # дельты только у абсолютных исходов
+
     assert 'body[data-tab="compare"]' in style
     assert "#compare-grid" in style
     assert "#compare-table" in style
@@ -638,3 +656,112 @@ def test_static_compare_tab(tmp_path):
     assert "ensureCompareLoaded" in script
     assert "redrawCompare" in script
     assert "LabCharts.drawTimeSeries" in script
+
+
+# ── Исходы финального мира: отказы, переключения цены, вызов (change world-final-config) ──
+
+
+def _write_meta(db: Path, **fields) -> None:
+    """Метаданные ветки рядом с БД (формат ``simulator.branches``)."""
+
+    payload = {"branch": db.stem, "channel": None, "callout_minutes_test": 0}
+    payload.update(fields)
+    db.with_name(f"{db.stem}.meta.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_branch_outcomes_cancelled_switches_and_callout(tmp_path):
+    """Отказы, `unserved`, переключения цены и часы вызова — ручной расчёт (2.1)."""
+
+    db = make_db(
+        tmp_path / "a-base.db",
+        trips=[
+            _trip(datetime(2026, 11, 3, 0, 10), pickup_at=datetime(2026, 11, 3, 0, 18)),
+            _trip(datetime(2026, 11, 3, 1, 30), pickup_at=datetime(2026, 11, 3, 1, 40)),
+            _trip(datetime(2026, 11, 3, 0, 20), status="unfulfilled"),
+            _trip(datetime(2026, 11, 3, 0, 30), status="cancelled"),
+        ],
+        metrics=[
+            # Зона 0: 1.00 → 1.15 → 1.15 — одна смена тарифа.
+            _metrics_row(datetime(2026, 11, 3, 0, 0), 0, requests=10, free_drivers=8),
+            _metrics_row(datetime(2026, 11, 3, 0, 5), 0, requests=10, free_drivers=8),
+            _metrics_row(datetime(2026, 11, 3, 0, 10), 0, requests=10, free_drivers=8),
+            # Зона 1: 1.00 → 1.00 — смен нет.
+            _metrics_row(datetime(2026, 11, 3, 0, 0), 1, requests=10, free_drivers=8),
+            _metrics_row(datetime(2026, 11, 3, 0, 5), 1, requests=10, free_drivers=8),
+        ],
+    )
+    # Тариф меняется в зоне 0 на втором бакете.
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "UPDATE zone_metrics_5min SET price_multiplier = 1.15"
+            " WHERE zone_id = 0 AND ts >= '2026-11-03 00:05:00'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _write_meta(db, channel="both", callout_minutes_test=180.0)
+
+    cfg = compare_config()
+    outcomes = branch_outcomes(db, cfg, cfg_path_min(cfg), compare_test_window(cfg))
+    assert outcomes["trips"] == 2
+    assert outcomes["unfulfilled"] == 1
+    assert outcomes["cancelled"] == 1
+    assert outcomes["unserved"] == 2
+    assert outcomes["price_switches"] == pytest.approx(0.5)  # 1 смена / (2 зоны × 1 сутки)
+    assert outcomes["callout_hours"] == pytest.approx(3.0)  # 180 мин / 60
+    assert outcomes["deterred"] is None and outcomes["saved"] is None  # заполняет A-сборка
+
+
+def test_branch_outcomes_old_grid_without_meta(tmp_path):
+    """Старая сетка без ``meta.json``: канал и часы вызова ``null``, прочее считается (2.1)."""
+
+    db = make_db(
+        tmp_path / "c-mlp.db",
+        trips=[_trip(datetime(2026, 11, 3, 2, 0), pickup_at=datetime(2026, 11, 3, 2, 5))],
+        metrics=[_metrics_row(datetime(2026, 11, 3, 0, 0), 0, requests=4, free_drivers=1)],
+    )
+    cfg = compare_config()
+    outcomes = branch_outcomes(db, cfg, cfg_path_min(cfg), compare_test_window(cfg))
+    assert outcomes["callout_hours"] is None
+    assert outcomes["trips"] == 1
+    assert outcomes["price_switches"] == pytest.approx(0.0)  # смен нет, строки есть
+
+
+def test_build_compare_relative_outcomes_and_no_deltas(tmp_path):
+    """`deterred`/`saved` считаются от A и дельт к A не имеют (2.1)."""
+
+    worlds = tmp_path / "worlds"
+    a_db = make_db(
+        worlds / "a-base.db",
+        trips=[
+            _trip(datetime(2026, 11, 3, 0, 10), pickup_at=datetime(2026, 11, 3, 0, 15)),
+            _trip(datetime(2026, 11, 3, 1, 10), pickup_at=datetime(2026, 11, 3, 1, 15)),
+            _trip(datetime(2026, 11, 3, 2, 10), status="unfulfilled"),
+            _trip(datetime(2026, 11, 3, 3, 10), status="unfulfilled"),
+        ],
+    )
+    c_db = make_db(
+        worlds / "c-mlp.db",
+        trips=[
+            _trip(datetime(2026, 11, 3, 0, 10), pickup_at=datetime(2026, 11, 3, 0, 15)),
+            _trip(datetime(2026, 11, 3, 1, 10), status="unfulfilled"),
+        ],
+    )
+    _write_meta(a_db, channel="both")
+    _write_meta(c_db, channel="heatmap")
+
+    data = build_compare(compare_config(), worlds)
+    by_name = {branch["name"]: branch for branch in data["branches"]}
+    assert by_name["a-base"]["channel"] == "both"
+    assert by_name["c-mlp"]["channel"] == "heatmap"
+    assert by_name["a-base"]["outcomes"]["deterred"] == 0
+    assert by_name["a-base"]["outcomes"]["saved"] == 0
+    assert by_name["c-mlp"]["outcomes"]["deterred"] == 1  # A перевёз 2, C — 1
+    assert by_name["c-mlp"]["outcomes"]["saved"] == 1  # у A необслужено 2, у C — 1
+    for branch in data["branches"]:
+        assert branch["delta"]["deterred"] is None
+        assert branch["delta"]["saved"] is None
+    assert by_name["b-reactive"]["channel"] is None  # ветки нет

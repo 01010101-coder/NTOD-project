@@ -961,9 +961,15 @@
 
   const OUTCOME_COLUMNS = [
     { key: 'trips', title: 'поездки', digits: 0, better: 'more' },
-    { key: 'unfulfilled', title: 'невыполненные', digits: 0, better: 'less' },
+    // Не обслужено = истёкшие + отказы пассажиров (change world-final-config).
+    { key: 'unserved', title: 'не обслужено', digits: 0, better: 'less' },
+    // Отпугнуто и спасено уже относительны к A — дельт под ними нет.
+    { key: 'deterred', title: 'отпугнуто', digits: 0, better: 'less' },
+    { key: 'saved', title: 'спасено', digits: 0, better: 'more' },
     { key: 'avg_wait_min', title: 'ожидание, мин', digits: 2, better: 'less' },
     { key: 'revenue', title: 'выручка, млн ₽', digits: 3, better: 'more', scale: 1e-6 },
+    { key: 'price_switches', title: 'переключения цены', digits: 2, better: 'less' },
+    { key: 'callout_hours', title: 'часы вызванных водителей', digits: 1, better: 'less' },
     {
       key: 'deficit_share',
       title: 'доля дефицита',
@@ -1029,7 +1035,7 @@
     const table = document.createElement('table');
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
-    for (const title of ['ветка', 'политика', ...OUTCOME_COLUMNS.map((c) => c.title)]) {
+    for (const title of ['ветка', 'политика', 'канал', ...OUTCOME_COLUMNS.map((c) => c.title)]) {
       const th = document.createElement('th');
       th.textContent = title;
       headRow.appendChild(th);
@@ -1046,7 +1052,9 @@
       nameCell.textContent = branch.name;
       const labelCell = document.createElement('td');
       labelCell.textContent = branch.label;
-      tr.append(nameCell, labelCell);
+      const channelCell = document.createElement('td');
+      channelCell.textContent = branch.channel ?? '—';
+      tr.append(nameCell, labelCell, channelCell);
       if (!branch.exists) {
         const missing = document.createElement('td');
         missing.className = 'missing';

@@ -73,7 +73,6 @@ from ml.planning import (
     planning_targets,
     predict_planning_windows,
 )
-from ml.train import ARTIFACTS_ROOT
 
 TOLERANCE = 0.01
 """Допуск частоты срабатываний: ±1 п.п. от цели (спека)."""
@@ -350,22 +349,34 @@ def _write_json(payload: dict, artifacts_root: str | Path) -> Path:
     return json_path
 
 
+def _resolve_root(cfg: AppConfig, artifacts_root: str | Path | None) -> Path:
+    """Корень артефактов: явный параметр или ``ml.artifacts_root`` конфига.
+
+    ``None`` — ключ конфига (change ``world-final-config``); дефолт
+    ``artifacts`` сохраняет прежние пути эталонного мира.
+    """
+
+    return Path(cfg.ml.artifacts_root) if artifacts_root is None else Path(artifacts_root)
+
+
 def calibrate_shifts(
     cfg: AppConfig,
     *,
     db_path: str | Path | None = None,
-    artifacts_root: str | Path = ARTIFACTS_ROOT,
+    artifacts_root: str | Path | None = None,
 ) -> tuple[dict, Path]:
     """Процедура калибровки (задача 1.3): подбор δ обоих семейств и запись json.
 
     ``db_path=None`` — БД из ``cfg.ml.db``. Guard'ы отсутствия артефактов и пустой
-    val-роли срабатывают до записи. Возвращает (payload, путь json).
+    val-роли срабатывают до записи. ``artifacts_root=None`` — ``ml.artifacts_root``
+    конфига. Возвращает (payload, путь json).
     """
 
+    root = _resolve_root(cfg, artifacts_root)
     payload = _calibrate_payload(
-        cfg, db_path=cfg.ml.db if db_path is None else db_path, artifacts_root=artifacts_root
+        cfg, db_path=cfg.ml.db if db_path is None else db_path, artifacts_root=root
     )
-    return payload, _write_json(payload, artifacts_root)
+    return payload, _write_json(payload, root)
 
 
 # ---------------------------------------------------------------------------
@@ -551,14 +562,15 @@ def calibrate_signal(
     *,
     db_path: str | Path | None = None,
     planning_artifacts_root: str | Path | None = None,
-    artifacts_root: str | Path = ARTIFACTS_ROOT,
+    artifacts_root: str | Path | None = None,
 ) -> tuple[dict, Path]:
     """Процедура калибровки порога (change ``policy-driver-signal``).
 
     ``db_path=None`` — БД из ``cfg.ml.db``; ``planning_artifacts_root=None`` —
-    ``ml.planning.artifacts_root`` конфига; ``artifacts_root`` — корень, куда
-    пишется ``signal-calibration.json``. Guard'ы отсутствия артефактов и пустой
-    val-роли срабатывают до записи. Возвращает (payload, путь json).
+    ``ml.planning.artifacts_root`` конфига; ``artifacts_root=None`` — корень
+    ``ml.artifacts_root`` конфига, куда пишется ``signal-calibration.json``.
+    Guard'ы отсутствия артефактов и пустой val-роли срабатывают до записи.
+    Возвращает (payload, путь json).
     """
 
     root = Path(
@@ -571,7 +583,7 @@ def calibrate_signal(
         db_path=cfg.ml.db if db_path is None else db_path,
         planning_artifacts_root=root,
     )
-    return payload, _write_signal_json(payload, artifacts_root)
+    return payload, _write_signal_json(payload, _resolve_root(cfg, artifacts_root))
 
 
 def _replace_shift_line(text: str, shift: Mapping[str, float]) -> str:
@@ -689,8 +701,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--db", default=None, help="БД эпохи (по умолчанию ml.db из конфига)")
     parser.add_argument(
         "--artifacts-root",
-        default=str(ARTIFACTS_ROOT),
-        help="корень каталогов артефактов моделей и json-результата (по умолчанию artifacts)",
+        default=None,
+        help=(
+            "корень каталогов артефактов моделей и json-результата (по умолчанию"
+            " ml.artifacts_root конфига, в дефолте — artifacts)"
+        ),
     )
     parser.add_argument(
         "--signal",
@@ -736,7 +751,7 @@ def _signal_main(args: argparse.Namespace) -> int:
         new_text = _replace_threshold_line(
             config_path.read_text(encoding="utf-8"), payload["threshold"]
         )
-        json_path = _write_signal_json(payload, args.artifacts_root)
+        json_path = _write_signal_json(payload, _resolve_root(cfg, args.artifacts_root))
         config_path.write_text(new_text, encoding="utf-8")
     except (FileNotFoundError, ValueError) as exc:
         print(f"калибровка сигнала прервана: {exc}", file=sys.stderr)
@@ -769,15 +784,16 @@ def main(argv: list[str] | None = None) -> int:
         return _signal_main(args)
     try:
         cfg = load_config(args.config)
+        root = _resolve_root(cfg, args.artifacts_root)
         payload = _calibrate_payload(
             cfg,
             db_path=cfg.ml.db if args.db is None else args.db,
-            artifacts_root=args.artifacts_root,
+            artifacts_root=root,
         )
         # Preflight правки конфига до всякой записи: нет строки — ошибка без json.
         config_path = Path(args.config)
         new_text = _replace_shift_line(config_path.read_text(encoding="utf-8"), payload["shift"])
-        json_path = _write_json(payload, args.artifacts_root)
+        json_path = _write_json(payload, root)
         config_path.write_text(new_text, encoding="utf-8")
     except (FileNotFoundError, ValueError) as exc:
         print(f"калибровка прервана: {exc}", file=sys.stderr)

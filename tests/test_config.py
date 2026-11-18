@@ -787,3 +787,25 @@ def test_policy_channel_and_signal_reference_config_equals_defaults() -> None:
     cfg = load_config(REFERENCE_CONFIG)
     assert cfg.policy.channel == "price"
     assert cfg.policy.signal == SignalCfg()
+
+
+# --- Корень артефактов ml.artifacts_root (change world-final-config) ---------
+
+
+def test_ml_artifacts_root_default_artifacts(tmp_path: Path) -> None:
+    """Дефолт корня артефактов — ``artifacts``: пути прежние (сценарий спеки)."""
+
+    assert AppConfig().ml.artifacts_root == "artifacts"
+    path = tmp_path / "config.yaml"
+    path.write_text("ml:\n  db: data/other.db\n", encoding="utf-8")
+    assert load_config(path).ml.artifacts_root == "artifacts"
+
+
+def test_ml_artifacts_root_from_file(tmp_path: Path) -> None:
+    """Явный корень читается из YAML и не трогает остальные поля ``ml``."""
+
+    path = tmp_path / "config.yaml"
+    path.write_text("ml:\n  artifacts_root: artifacts/final\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.ml.artifacts_root == "artifacts/final"
+    assert cfg.ml.db == "data/m3_epoch.db"

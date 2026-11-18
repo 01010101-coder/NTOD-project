@@ -62,7 +62,6 @@ from ml.dataset import (
 )
 from ml.infer import latest_artifact_dir, load_model_artifact, predict_windows
 from ml.planning import PlanningPredictor
-from ml.train import ARTIFACTS_ROOT
 from simulator.live import MinuteRecord
 
 if TYPE_CHECKING:
@@ -321,12 +320,14 @@ class NetworkPredictor:
         cfg: AppConfig,
         *,
         family: str,
-        artifacts_root: str | Path = ARTIFACTS_ROOT,
+        artifacts_root: str | Path | None = None,
     ) -> None:
         """Восстановить сеть из свежайшего каталога семейства ``family``.
 
         ``n_zones`` (ёмкость эмбеддинга) — параметр окружения, берётся из
-        города конфига, как в ml-inference.
+        города конфига, как в ml-inference. ``artifacts_root=None`` — корень
+        ``ml.artifacts_root`` конфига (дефолт ``artifacts`` сохраняет прежние
+        пути; явный параметр нужен тестам и лабораторным мирам).
         """
 
         if cfg.policy.horizon_min not in RET_HORIZONS_MIN:
@@ -334,7 +335,8 @@ class NetworkPredictor:
                 f"policy.horizon_min={cfg.policy.horizon_min} вне горизонтов"
                 f" контракта {RET_HORIZONS_MIN}"
             )
-        model_dir = latest_artifact_dir(artifacts_root, family)
+        root = Path(cfg.ml.artifacts_root) if artifacts_root is None else Path(artifacts_root)
+        model_dir = latest_artifact_dir(root, family)
         n_zones = max(zone.id for zone in cfg.city.zones) + 1
         self._artifact = load_model_artifact(model_dir, n_zones=n_zones)
         self._source = source
@@ -625,17 +627,20 @@ class ShadowForecaster:
         self,
         cfg: AppConfig,
         *,
-        artifacts_root: str | Path = ARTIFACTS_ROOT,
+        artifacts_root: str | Path | None = None,
         flush: Callable[[list[dict]], None] | None = None,
     ) -> None:
-        """Поднять обе сети и собрать границы; каталогов нет — исключение до прогона."""
+        """Поднять обе сети и собрать границы; каталогов нет — исключение до прогона.
+
+        ``artifacts_root=None`` — корень ``ml.artifacts_root`` конфига (дефолт
+        ``artifacts`` сохраняет прежние пути).
+        """
 
         zones = [zone.id for zone in cfg.city.zones]
         n_zones = max(zones) + 1
+        root = Path(cfg.ml.artifacts_root) if artifacts_root is None else Path(artifacts_root)
         self._artifacts = {
-            family: load_model_artifact(
-                latest_artifact_dir(artifacts_root, family), n_zones=n_zones
-            )
+            family: load_model_artifact(latest_artifact_dir(root, family), n_zones=n_zones)
             for family in self.FAMILIES
         }
         self._source = LiveRowSource(agg_step_min=cfg.engine.agg_step_min)
