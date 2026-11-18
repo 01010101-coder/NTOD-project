@@ -15,11 +15,13 @@ CSV-файлы равны таблицам плюс заголовок. Guard и
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+# Интерпретатор текущего окружения: .venv/bin/python на POSIX, .venv/Scripts/python.exe на Windows.
+PYTHON = Path(sys.executable)
 TIME_LIMIT_SEC = 10  # производная граница бюджета §5 (30 дней ≤ 60 с) с запасом
 
 # Шаблоны сводки §4 (числа иллюстративны; regex скрипта приёмки допускает [0-9.]+).

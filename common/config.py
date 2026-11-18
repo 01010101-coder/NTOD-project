@@ -459,11 +459,11 @@ _DEFAULT_STAIR_ROWS: list[dict[str, float]] = [
 
 # δ-сдвиги ступеней по семействам моделей; модель без записи в ``shift``
 # получает сдвиг 0.0 (сценарий «Значения из файла переопределяют дефолты»).
-# Значения — результат приёмочной δ-калибровки change ``m6-worlds``
-# (artifacts/policy-calibration.json: val-дни 29–30 эпохи M3, цель 0.10,
-# частоты после 0.100/0.102), синхронно с config.yaml — прецедент
-# dest_decay_min/drivers.count после m2-calibration.
-_DEFAULT_SHIFT: dict[str, float] = {"mlp": -0.453, "lstm": -0.438}
+# Значения — результат δ-калибровки по растягивающей формуле change
+# ``policy-stretch-calibration`` (artifacts/policy-calibration.json: val-дни
+# 29–30 эпохи M3, цель 0.10, частоты после 0.098/0.100), синхронно с
+# config.yaml — прецедент dest_decay_min/drivers.count после m2-calibration.
+_DEFAULT_SHIFT: dict[str, float] = {"mlp": -0.719, "lstm": -0.688}
 
 
 class PolicyStairCfg(_CfgBase):

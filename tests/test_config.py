@@ -207,7 +207,7 @@ def test_policy_section_defaults() -> None:
         ],
         total_cap=2.0,
         reactive_mult=1.30,
-        shift={"mlp": -0.453, "lstm": -0.438},
+        shift={"mlp": -0.719, "lstm": -0.688},
         target_fire_rate=0.10,
         worlds_dir="data/worlds",
     )
@@ -236,7 +236,7 @@ def test_policy_section_from_file(tmp_path: Path) -> None:
         PolicyStairCfg(p_min=0.50, mult=1.10),
     ]
     assert cfg.policy.shift["mlp"] == -0.05
-    assert cfg.policy.shift["lstm"] == -0.438  # незаданная модель — калиброванный дефолт
+    assert cfg.policy.shift["lstm"] == -0.688  # незаданная модель — калиброванный дефолт
     assert cfg.policy.horizon_min == 15  # незаданные ключи секции — дефолты
 
 

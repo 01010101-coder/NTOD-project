@@ -2,7 +2,7 @@
 
 Ступенчатая политика по прогнозной вероятности дефицита (ветки C/D) и
 реактивная по факту последнего закрытого бакета (ветка B, анти-пример ТЗ):
-``p_eff = clip(deficit_prob + shift[model], 0, 1)`` → ступень с наибольшим
+``p_eff = effective_prob(deficit_prob, shift[model])`` → ступень с наибольшим
 ``p_min ≤ p_eff``; итоговый тариф зоны компонуется с тарифом мира умножением
 с потолком ``total_cap`` (решение 6 плана M5+M6), при множителе 1.00 тариф
 мира возвращается без изменений — политика, не вмешивающаяся в данный момент,
@@ -65,6 +65,7 @@ __all__ = [
     "ShadowForecaster",
     "compose_tariff",
     "has_deficit",
+    "effective_prob",
     "model_shift",
     "reactive_multiplier",
     "stair_multiplier",
@@ -95,17 +96,41 @@ def model_shift(model: str, shift: Mapping[str, float]) -> float:
     return shift.get(model, 0.0)
 
 
+def effective_prob(deficit_prob, shift: float):
+    """Эффективная вероятность ступенчатой политики (скаляр или массив numpy).
+
+    ``shift ≥ 0`` — сдвиг вверх: ``clip(p + shift, 0, 1)``. ``shift < 0`` —
+    растяжение отрезка ``[−shift, 1]`` на ``[0, 1]``: ``clip((p + shift) /
+    (1 + shift), 0, 1)``. Простой сдвиг вниз срезал верх шкалы: при
+    калиброванном δ ≈ −0.44 вероятность 1.0 давала ``p_eff`` 0.56, и ступени
+    с порогами 0.6 и 0.8 не срабатывали никогда. Растяжение сохраняет порог
+    первой ступени (та же частота вмешательств) и оставляет ``p = 1 → 1``,
+    поэтому уверенный прогноз доходит до верхних ступеней. Обе ветви
+    монотонны по ``shift`` — на этом держится бинарный поиск калибровки.
+    """
+
+    p = np.asarray(deficit_prob, dtype=float)
+    if shift >= 0:
+        p_eff = p + shift
+    elif shift <= -1.0:
+        p_eff = np.where(p >= 1.0, 1.0, 0.0)
+    else:
+        p_eff = (p + shift) / (1.0 + shift)
+    p_eff = np.clip(p_eff, 0.0, 1.0)
+    return float(p_eff) if p_eff.ndim == 0 else p_eff
+
+
 def stair_multiplier(deficit_prob: float, shift: float, stairs: Sequence[PolicyStairCfg]) -> float:
     """Множитель ступенчатой политики: верхняя ступень с ``p_min ≤ p_eff``.
 
-    ``p_eff = clip(deficit_prob + shift, 0, 1)``; порог ступени включается
+    ``p_eff = effective_prob(deficit_prob, shift)``; порог ступени включается
     (``p_eff`` ровно ``p_min`` уже активирует ступень), порядок списка
     ``stairs`` на результат не влияет — ищется наибольший ``p_min`` среди
     наступивших; ни одна ступень не наступила — множитель 1.00. Чистая
     функция без скрытого состояния.
     """
 
-    p_eff = min(1.0, max(0.0, deficit_prob + shift))
+    p_eff = effective_prob(deficit_prob, shift)
     active = [stair for stair in stairs if stair.p_min <= p_eff]
     if not active:
         return 1.0

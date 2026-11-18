@@ -20,6 +20,7 @@ import json
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -34,7 +35,8 @@ from storage.repo import insert_forecasts
 from storage.schema import init_db
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+# Интерпретатор текущего окружения: .venv/bin/python на POSIX, .venv/Scripts/python.exe на Windows.
+PYTHON = Path(sys.executable)
 SIM_START_DT = from_iso("2026-11-02 00:00:00")
 
 MICRO_ZONES = [
@@ -163,6 +165,40 @@ def test_api_city():
     assert len(routes) == 2 and all(len(row) == 2 for row in routes)
     assert routes[0][0] == [0] and routes[1][1] == [1]
     assert routes[0][1] == [0, 1] and routes[1][0] == [1, 0]
+
+
+def test_api_deficit_timeline_matches_metrics():
+    """/api/deficit-timeline: по окну — число зон в дефиците, как по /api/metrics."""
+
+    from ml.dataset import deficit_label
+
+    cfg = micro_config(population={"scale": 50.0})
+    with make_client(cfg, days=0.2) as client:
+        wait_filled(client, 288)
+        metrics = client.get("/api/metrics").json()["metrics"]
+        timeline = client.get("/api/deficit-timeline").json()
+
+    stamps = sorted({row["ts"] for row in metrics})
+    assert timeline["start"] == stamps[0]
+    assert timeline["step"] == cfg.engine.agg_step_min
+    assert timeline["zones"] == len(cfg.city.zones)
+    # Ответы сняты в разные моменты фонового прогона: сравниваем общий префикс.
+    expected = [
+        sum(
+            deficit_label(row["requests"], row["free_drivers"], row["unfulfilled"])
+            for row in metrics
+            if row["ts"] == ts
+        )
+        for ts in stamps
+    ]
+    common = min(len(expected), len(timeline["counts"]))
+    assert common > 0
+    assert timeline["counts"][:common] == expected[:common]
+    assert all(0 <= count <= timeline["zones"] for count in timeline["counts"])
+    expected_requests = [sum(r["requests"] for r in metrics if r["ts"] == ts) for ts in stamps]
+    assert timeline["requests"][:common] == expected_requests[:common]
+    rain_by_ts = {row["ts"]: int(row["is_rain"]) for row in metrics}
+    assert timeline["rain"][:common] == [rain_by_ts[ts] for ts in stamps][:common]
 
 
 def test_api_metrics_filters():
@@ -371,6 +407,22 @@ def test_ws_seek_snapshot_and_clamp():
             assert snapshot["env"]["is_rain"] == record.is_rain
             assert snapshot["env"]["price_mult"] == list(record.price_mult)
             assert snapshot["env"]["free_by_zone"] == list(record.free_by_zone)
+            # Кайма последнего закрытого окна [395, 400): правило дефицита по метрикам.
+            from ml.dataset import deficit_label
+
+            window_ts = "2026-11-02 06:35:00"
+            window_rows = [
+                row
+                for row in client.get("/api/metrics").json()["metrics"]
+                if row["ts"] == window_ts
+            ]
+            assert window_rows
+            expected_deficit = [False] * len(cfg.city.zones)
+            for row in window_rows:
+                expected_deficit[row["zone_id"]] = bool(
+                    deficit_label(row["requests"], row["free_drivers"], row["unfulfilled"])
+                )
+            assert snapshot["env"]["deficit"] == expected_deficit
             expected = active_manual(client, minute)
             assert snapshot["active_trips"] == expected
             assert snapshot["active_trips"], "сценарий без активных поездок не проверен"

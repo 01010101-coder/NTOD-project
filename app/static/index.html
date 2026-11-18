@@ -4,77 +4,129 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Такси — живой город</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 4'><rect width='4' height='4' fill='%23f5c518'/><path d='M0 0h1v1H0zM2 0h1v1H2zM1 1h1v1H1zM3 1h1v1H3zM0 2h1v1H0zM2 2h1v1H2zM1 3h1v1H1zM3 3h1v1H3z' fill='%23111'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body data-app="city-canvas" data-tab="city">
-  <header id="panel">
-    <div class="chip clock">
-      <span id="clock-time">--:--</span>
-      <span id="clock-date">— · —</span>
+  <header id="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Дефицит такси</span></div>
+    <nav id="tab-bar">
+      <button class="tab active" data-tab="city">Город</button>
+      <button class="tab" data-tab="lab">Лаборатория</button>
+      <button class="tab" data-tab="compare">Сравнение</button>
+    </nav>
+    <div class="sep city-only" aria-hidden="true"></div>
+    <div class="clock city-only">
+      <span id="clock-time" class="mono">--:--</span>
+      <span id="clock-date">—</span>
     </div>
-    <label class="chip world" for="world-select" title="мир воспроизведения">мир
-      <select id="world-select"></select>
-    </label>
-    <div class="chip world-label" id="world-label" title="метка активного мира">—</div>
-    <button id="paint-toggle" class="chip toggle" title="окраска зон">кайма: факт</button>
-    <div class="chip" id="weather">☁️ ясно</div>
-    <div class="chip event hidden" id="event-badge"></div>
-    <div class="chip counters">
-      <span id="cars-count" title="активные машины">🚗 0</span>
-      <span id="orders-count" title="ожидают назначения">🕐 0</span>
+    <div class="chips city-only">
+      <span class="chip-pill weather" id="weather">без осадков</span>
+      <span class="chip-pill event hidden" id="event-badge"></span>
     </div>
-    <button id="play-pause" title="воспроизведение">▶</button>
-    <label class="chip" for="speed-select">скорость
-      <select id="speed-select">
-        <option value="0.25">0.25×</option>
-        <option value="1" selected>1×</option>
-        <option value="5">5×</option>
-        <option value="15">15×</option>
-        <option value="60">60×</option>
-        <option value="120">120×</option>
-        <option value="600">600×</option>
-      </select>
-    </label>
-    <div class="chip status" id="status">подключение…</div>
+    <div class="top-right">
+      <div class="city-only top-group">
+        <span class="top-label">Мир</span>
+        <div class="seg" id="world-seg" role="group" aria-label="Мир"></div>
+        <select id="world-select" class="visually-hidden" tabindex="-1" aria-hidden="true"></select>
+        <span id="world-label" class="visually-hidden">—</span>
+      </div>
+      <div class="seg city-only" id="paint-toggle" role="group" aria-label="Подсветка районов">
+        <button data-mode="fact" aria-pressed="true">Факт</button>
+        <button data-mode="forecast" aria-pressed="false">Прогноз</button>
+      </div>
+      <span class="status" id="status">подключение…</span>
+    </div>
   </header>
 
-  <nav id="tab-bar">
-    <button class="tab active" data-tab="city">Город</button>
-    <button class="tab" data-tab="lab">Лаборатория</button>
-    <button class="tab" data-tab="compare">Сравнение</button>
-  </nav>
+  <div id="city">
+    <main id="map-wrap">
+      <canvas id="map"></canvas>
+      <div id="districts"></div>
 
-  <main id="map-wrap">
-    <canvas id="map"></canvas>
-    <div id="map-legend">
-      <span><i class="swatch to-pickup"></i>к пассажиру</span>
-      <span><i class="swatch on-trip"></i>в поездке</span>
-      <span><i class="swatch pending"></i>ожидание</span>
-      <span><i class="swatch flash"></i>истечение</span>
-      <span><i class="swatch deficit"></i>дефицит</span>
-    </div>
-  </main>
+      <div class="summary" id="summary">
+        <div><span>В пути</span><b class="mono" id="cars-count">0</b></div>
+        <div><span>К пассажиру</span><b class="mono" id="pickup-count">0</b></div>
+        <div><span>Районов в дефиците</span><b class="mono"><span id="deficit-count">0</span><small> / 6</small></b></div>
+        <div><span>Заказов в час</span><b class="mono" id="orders-hour">—</b></div>
+      </div>
+
+      <div class="fc-note hidden" id="fc-note">
+        <span id="fc-note-text"></span>
+        <button id="fc-jump" class="ghost-btn">Перейти к дню 31</button>
+        <button id="fc-close" class="note-close" aria-label="Скрыть подсказку" title="Скрыть">×</button>
+      </div>
+
+      <div class="legend" id="map-legend">
+        <span><i class="lg-trip"></i>в поездке</span>
+        <span><i class="lg-pick"></i>едет к пассажиру</span>
+        <span class="lg-fact"><i class="lg-def"></i>дефицит: свободных &lt; заказов / 2</span>
+        <span class="lg-fc">вероятность дефицита <i class="lg-scale"><b></b><b></b><b></b></i><span class="mono">0 → 1</span></span>
+      </div>
+    </main>
+
+    <aside id="zone-card" aria-live="polite">
+      <div class="zc-head">
+        <div><div class="mono zc-name" id="zc-name">—</div><div class="zc-type" id="zc-type">—</div></div>
+        <button id="zc-close" class="icon-btn" aria-label="Закрыть карточку"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="zc-status"><span class="tag" id="zc-status">—</span><span id="zc-rule"></span></div>
+      <div class="zc-grid">
+        <div><span>Свободно</span><b class="mono" id="zc-free">—</b></div>
+        <div><span>Тариф</span><b class="mono" id="zc-price">—</b></div>
+        <div><span>Заказов за 5 мин</span><b class="mono" id="zc-req">—</b></div>
+        <div><span>Вероятность дефицита</span><b class="mono" id="zc-prob">—</b></div>
+      </div>
+      <div>
+        <div class="zc-sub"><span>Последние 6 часов</span><span id="zc-model"></span></div>
+        <canvas id="zc-spark"></canvas>
+        <div class="mono zc-axis" id="zc-axis"></div>
+        <div class="zc-legend">
+          <span><i class="ln free"></i>свободно</span>
+          <span><i class="ln half"></i>заказы / 2</span>
+          <span><i class="sq def"></i>дефицит</span>
+        </div>
+      </div>
+      <div>
+        <div class="zc-sub"><span>Дороги из района</span></div>
+        <ul class="zc-roads mono" id="zc-roads"></ul>
+      </div>
+    </aside>
+  </div>
 
   <section id="charts">
     <div id="charts-head">
-      <label class="chip" for="zone-select">зона
-        <select id="zone-select"></select>
-      </label>
-      <div id="charts-legend">
-        <span><i class="line requests"></i>заказы</span>
-        <span><i class="line completed"></i>завершено</span>
-        <span><i class="line unfulfilled"></i>не выполнено</span>
-        <span><i class="line free"></i>свободные</span>
-        <span><i class="line price"></i>тариф</span>
-      </div>
+      <span class="ch-title">Метрики · <span class="mono" id="chart-zone">center</span> · 24 ч</span>
+      <span class="ch-lg"><i class="ln free"></i>свободно</span>
+      <span class="ch-lg"><i class="ln ord"></i>заказов за 5 мин</span>
+      <span class="ch-lg"><i class="sq def"></i>дефицит</span>
+      <select id="zone-select" class="visually-hidden" tabindex="-1" aria-hidden="true"></select>
+      <button id="charts-toggle" class="ghost-btn" aria-expanded="true">Свернуть <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
     </div>
     <canvas id="chart"></canvas>
   </section>
 
   <footer id="slider-bar">
-    <span class="range-edge" id="range-first">—</span>
-    <input id="time-slider" type="range" min="0" max="0" value="0" step="1">
-    <span class="range-edge" id="range-last">—</span>
+    <button id="play-pause" aria-label="Воспроизведение (пробел)"></button>
+    <div class="seg mono" id="speed-seg" role="group" aria-label="Скорость">
+      <button data-speed="0.25">0.25×</button>
+      <button data-speed="1">1×</button>
+      <button data-speed="10">10×</button>
+      <button data-speed="60">60×</button>
+      <button data-speed="600">600×</button>
+    </div>
+    <div id="timeline">
+      <canvas id="deficit-strip"></canvas>
+      <input id="time-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Время симуляции">
+    </div>
+    <div class="tl-pos">
+      <div class="mono" id="tl-now">—</div>
+      <div class="tl-of" id="tl-of">—</div>
+      <span id="range-first" class="visually-hidden">—</span>
+      <span id="range-last" class="visually-hidden">—</span>
+    </div>
   </footer>
 
   <section id="lab">
@@ -84,6 +136,15 @@
         <code>python -m ml infer</code> — после этого откройте вкладку заново.</p>
     </div>
     <div id="lab-grid" class="hidden">
+      <header class="page-head wide">
+        <div><h1>Лаборатория моделей</h1><p>Тестовая неделя · дни 31–37 · прогноз на 15 и 30 минут</p></div>
+      </header>
+
+      <section class="lab-card wide" id="lab-kpis-panel">
+        <h2>Качество прогноза дефицита <span class="h2-sub">F1 · горизонт 15 мин</span></h2>
+        <div class="rings" id="lab-kpis"></div>
+      </section>
+
       <section class="lab-card" id="model-panel">
         <h2>Модель</h2>
         <label class="lab-field">версия
@@ -124,6 +185,9 @@
           <label class="lab-field">модель
             <select id="ml-fc-model-select"></select>
           </label>
+          <label class="lab-field">день
+            <select id="ml-day-select"><option value="all">вся неделя</option></select>
+          </label>
           <label class="lab-field">таргет
             <select id="ml-target-select">
               <option value="requests" selected>спрос</option>
@@ -131,8 +195,8 @@
             </select>
           </label>
           <span id="forecast-legend" class="lab-legend">
-            <span><i class="line" style="background:#4cc9f0"></i>прогноз</span>
-            <span><i class="line" style="background:#ffd166"></i>факт</span>
+            <span><i class="line" style="background:#f5c518"></i>прогноз</span>
+            <span><i class="swatch" style="background:rgba(201,204,209,0.35);height:10px"></i>факт</span>
             <span><i class="band"></i>дефицит (prob &gt; 0.5)</span>
           </span>
         </div>
@@ -166,13 +230,19 @@
         вкладку заново.</p>
     </div>
     <div id="compare-grid" class="hidden">
-      <section class="lab-card" id="compare-outcomes-panel">
+      <header class="page-head wide">
+        <div><h1>Сравнение миров</h1><p>Один и тот же город и seed, разные ценовые политики · тестовая неделя</p></div>
+      </header>
+
+      <section class="world-cards wide" id="compare-cards"></section>
+
+      <section class="lab-card wide" id="compare-outcomes-panel">
         <h2>Исходы тест-недели</h2>
         <div id="compare-window" class="lab-caption"></div>
         <div id="compare-table" class="table-wrap"></div>
       </section>
 
-      <section class="lab-card" id="compare-revenue-panel">
+      <section class="lab-card wide" id="compare-revenue-panel">
         <h2>Кумулятивная выручка, млн ₽</h2>
         <div id="compare-revenue-head">
           <span id="compare-legend" class="lab-legend"></span>
@@ -181,7 +251,7 @@
         <p id="compare-revenue-note" class="lab-note"></p>
       </section>
 
-      <section class="lab-card" id="compare-accuracy-panel">
+      <section class="lab-card wide" id="compare-accuracy-panel">
         <h2>Точность тень-моделей</h2>
         <div id="compare-accuracy" class="table-wrap"></div>
         <p class="lab-note">Точность считается против факта ветки A; в B/C/D не
@@ -193,5 +263,6 @@
   <script src="/static/app.js"></script>
   <script src="/static/map.js"></script>
   <script src="/static/charts.js"></script>
+  <script src="/static/hud.js"></script>
 </body>
 </html>

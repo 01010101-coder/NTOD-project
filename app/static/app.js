@@ -20,6 +20,9 @@
   const LAB_PAD = { left: 48, right: 14, top: 26, bottom: 22 }; // геометрия лаб-графика
 
   const WEEKDAYS = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'];
+  const WEEKDAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+  const dayPeriod = (hour) =>
+    hour < 5 ? 'ночь' : hour < 8 ? 'рассвет' : hour < 12 ? 'утро' : hour < 17 ? 'день' : hour < 21 ? 'сумерки' : 'ночь';
 
   // ── Хранилище мира: единственный источник состояния для отрисовки ──
   const world = {
@@ -85,6 +88,10 @@
       time: `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}`,
       date: `${pad(dt.getUTCDate())}.${pad(dt.getUTCMonth() + 1)}.${dt.getUTCFullYear()}`,
       weekday: WEEKDAYS[(dt.getUTCDay() + 6) % 7],
+      // «Пт · день 12 из 37 · сумерки» — строка шапки по макету.
+      long: `${WEEKDAYS_SHORT[(dt.getUTCDay() + 6) % 7]} · день ${Math.floor(minute / 1440) + 1} из ${
+        world.activeWorld ? Math.ceil(world.totalDays || 37) : 37
+      } · ${dayPeriod(dt.getUTCHours())}`,
     };
   };
 
@@ -175,25 +182,30 @@
     world.forecastBucket = closed;
     if (closed < 0 || !forecastVersion()) {
       world.forecastDeficit = {};
+      world.forecastProb = {};
       return;
     }
     void loadForecastBlock(forecastBlockStart(closed));
     const rows = world.forecastBuckets.get(closed);
     const next = {};
+    const prob = {};
     if (rows) {
-      for (const row of rows) next[row.zone_id] = row.deficit_prob >= DEFICIT_PROB_LIMIT;
+      for (const row of rows) {
+        next[row.zone_id] = row.deficit_prob >= DEFICIT_PROB_LIMIT;
+        prob[row.zone_id] = row.deficit_prob;
+      }
     }
     world.forecastDeficit = next;
+    world.forecastProb = prob; // вероятности для плашек и ореолов карты
   };
-
-  const paintLabel = () => `кайма: ${world.paintMode === 'forecast' ? 'прогноз' : 'факт'}`;
 
   const setPaintMode = async (mode) => {
     world.paintMode = mode === 'forecast' ? 'forecast' : 'fact';
-    if (els.paintToggle) {
-      els.paintToggle.textContent = paintLabel();
-      els.paintToggle.classList.toggle('forecast', world.paintMode === 'forecast');
+    // Сегмент «Факт / Прогноз» и класс body (легенда меняет шкалу).
+    for (const button of els.paintToggle?.querySelectorAll('button') ?? []) {
+      button.setAttribute('aria-pressed', String(button.dataset.mode === world.paintMode));
     }
+    document.body.classList.toggle('mode-forecast', world.paintMode === 'forecast');
     resetForecastState();
     if (world.paintMode === 'forecast') {
       if (!lab.loaded) await ensureLabLoaded(); // модель — селектор «Лаборатории»
@@ -212,6 +224,7 @@
       els.worldLabel.textContent = world.activeWorld.label;
       els.worldLabel.title = world.activeWorld.label;
     }
+    syncWorldSeg();
     if (changed) {
       // Мир сменился: записи старого мира не применяем до снимка нового,
       // кэш прогнозов и метрики городских графиков сбрасываются.
@@ -221,6 +234,41 @@
       setTimeout(() => {
         world.awaitingSnapshot = false; // WS мог переподключиться — не глушим навсегда
       }, 5000);
+    }
+  };
+
+  // Сегмент миров в шапке: «Эпоха · A · B · C · D», подсказка — метка политики.
+  const WORLD_SHORT = { 'a-base': 'A', 'b-reactive': 'B', 'c-mlp': 'C', 'd-lstm': 'D' };
+  // Подсказки к кнопкам миров: зачем каждый нужен (а не технические метки веток).
+  const WORLD_HINTS = {
+    epoch:
+      'Эпоха — данные для нейросетей: 37 дней без политики. На днях 1–30 модели обучались, ' +
+      'на днях 31–37 проверялись; режим «Прогноз» показывает именно эти прогнозы.',
+    'a-base': 'A — контроль: тот же город без ценовой политики, база для сравнения миров',
+    'b-reactive': 'B — реактивная политика: ×1.30 там, где дефицит уже наступил (дни 31–37)',
+    'c-mlp': 'C — тариф ступенями ×1.15 / ×1.30 / ×1.50 по прогнозу MLP (дни 31–37)',
+    'd-lstm': 'D — тариф ступенями ×1.15 / ×1.30 / ×1.50 по прогнозу LSTM (дни 31–37)',
+  };
+  const renderWorldSeg = () => {
+    const seg = document.getElementById('world-seg');
+    if (!seg) return;
+    seg.innerHTML = '';
+    for (const entry of world.availableWorlds) {
+      const button = document.createElement('button');
+      button.textContent = entry.name === EPOCH_WORLD ? 'Эпоха' : WORLD_SHORT[entry.name] ?? entry.name;
+      const hint = WORLD_HINTS[entry.name] ?? entry.label;
+      button.title = entry.exists ? hint : `${hint} (БД не сгенерирована)`;
+      button.disabled = !entry.exists;
+      button.dataset.world = entry.name;
+      button.setAttribute('aria-pressed', String(entry.name === world.activeWorld?.name));
+      button.onclick = () => switchWorld(entry.name);
+      seg.appendChild(button);
+    }
+  };
+
+  const syncWorldSeg = () => {
+    for (const button of document.querySelectorAll('#world-seg button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.world === world.activeWorld?.name));
     }
   };
 
@@ -248,6 +296,7 @@
       option.disabled = !entry.exists;
       els.worldSelect.appendChild(option);
     }
+    renderWorldSeg();
     const active = world.activeWorld?.name;
     if (active && [...els.worldSelect.options].some((o) => o.value === active)) {
       els.worldSelect.value = active;
@@ -391,7 +440,9 @@
     world.appliedUpTo = message.index;
     world.winRequests = new Array(world.zones.length).fill(0);
     world.winExpiries = new Array(world.zones.length).fill(0);
-    world.deficit = new Array(world.zones.length).fill(false);
+    // Кайма последнего закрытого окна приходит в снимке — после seek карта
+    // сразу показывает дефицит, а не ждёт закрытия следующего окна.
+    world.deficit = world.zones.map((zone) => Boolean(message.env.deficit?.[zone.id]));
     world.flashes = [];
     world.clock = message.index;
     world.position = message.index;
@@ -416,6 +467,7 @@
         world.speed = message.speed;
         world.filled = message.filled;
         if (message.world) setActiveWorld(message.world);
+        if (message.world?.days) world.totalDays = message.world.days;
         if (!world.simStartUTC && message.world?.sim_start) setSimStart(message.world.sim_start);
         syncClock(message);
         status('подключено');
@@ -484,14 +536,20 @@
     if (!world.simStartUTC) return;
     const parts = clockParts(world.clock);
     setText('time', els.time, parts.time);
-    setText('date', els.date, `${parts.date} · ${parts.weekday}`);
-    setText('weather', els.weather, world.isRain ? '🌧️ дождь' : '☁️ ясно');
-    setText('cars', els.cars, `🚗 ${world.activeTrips.size}`);
-    setText('orders', els.orders, `🕐 ${world.pending.size}`);
-    setText('play', els.play, world.playing ? '⏸' : '▶');
+    setText('date', els.date, parts.long);
+    // Иконка play/pause рисуется CSS по классу кнопки.
+    els.play.classList.toggle('playing', world.playing);
+    // Селектор скорости — по серверному значению (скорость общая для всех вкладок).
+    const speedValue = String(world.speed);
+    if (cache.speed !== speedValue && els.speed) {
+      cache.speed = speedValue;
+      for (const button of els.speed.querySelectorAll('button')) {
+        button.setAttribute('aria-pressed', String(Number(button.dataset.speed) === world.speed));
+      }
+    }
     // Метка события окна — из метрик выбранной зоны (charts.js), вне кадра тоже.
     if (window.CityCharts) world.event = window.CityCharts.eventAt(world.clock);
-    const eventLabel = { friday_evening: '🍻 пятничный вечер', surge_injection: '📈 surge' }[world.event];
+    const eventLabel = { friday_evening: 'пятничный вечер', surge_injection: 'всплеск тарифа' }[world.event];
     els.event.classList.toggle('hidden', !eventLabel);
     if (eventLabel) setText('event', els.event, eventLabel);
   };
@@ -518,6 +576,7 @@
       horizon: 15,
       fcModel: null, // модель графика факт-vs-прогноз — последняя сеть
       target: 'requests', // спрос | сток
+      day: null, // день графика факт-vs-прогноз: 'all' или ключ даты; null — первый день
       calHorizon: 15, // горизонт калибровки (свой селектор панели)
     },
   };
@@ -561,17 +620,18 @@
   // LabCharts.drawTimeSeries (те же поля канваса и оси x).
   const labMinuteAtClick = (event) => {
     const canvas = labEls['forecast-chart'];
-    if (!canvas || !lab.forecasts.length) return null;
+    const shown = visibleForecasts();
+    if (!canvas || !shown.length) return null;
     const rect = canvas.getBoundingClientRect();
     const plotW = rect.width - LAB_PAD.left - LAB_PAD.right;
     const x = event.clientX - rect.left;
     if (plotW <= 0 || x < LAB_PAD.left || x > LAB_PAD.left + plotW) return null;
-    const xs = lab.forecasts.map((row) => isoToMs(row.ts));
+    const xs = shown.map((row) => isoToMs(row.ts));
     const xMin = Math.min(...xs);
     const xMax = Math.max(...xs);
     const ms = xMax === xMin ? xMin : xMin + ((x - LAB_PAD.left) / plotW) * (xMax - xMin);
-    let nearest = lab.forecasts[0];
-    for (const row of lab.forecasts) {
+    let nearest = shown[0];
+    for (const row of shown) {
       if (Math.abs(isoToMs(row.ts) - ms) < Math.abs(isoToMs(nearest.ts) - ms)) nearest = row;
     }
     return isoToMinute(nearest.ts);
@@ -694,12 +754,12 @@
       series: [
         {
           name: 'train',
-          color: '#8ecae6',
+          color: '#5aa9e6',
           points: model.loss.map((e) => ({ x: e.epoch, y: e.train.total })),
         },
         {
           name: 'val',
-          color: '#c792ea',
+          color: '#a48fd6',
           points: model.loss.map((e) => ({ x: e.epoch, y: e.val.total })),
         },
       ],
@@ -776,8 +836,66 @@
       }
       tbody.appendChild(tr);
     }
+    // Лучшее значение колонки — зелёным: MAE/RMSE (первые 8) меньше лучше,
+    // precision/recall/F1 — больше лучше.
+    const rows = [...tbody.rows];
+    for (let col = 1; rows.length && col < rows[0].cells.length; col += 1) {
+      const cells = rows.map((row) => row.cells[col]);
+      const values = cells.map((cell) => Number(cell.textContent)).filter(Number.isFinite);
+      if (!values.length) continue;
+      const best = col <= 8 ? Math.min(...values) : Math.max(...values);
+      for (const cell of cells) {
+        if (Number(cell.textContent) === best) cell.classList.add('best');
+      }
+    }
     table.append(thead, tbody);
     wrap.appendChild(table);
+  };
+
+  // Кольца F1 детекции дефицита по моделям (горизонт 15 мин) — верх «Лаборатории».
+  const MODEL_TITLES = [
+    [/^naive-persist/, 'Как сейчас'],
+    [/^naive-season/, 'Сутки назад'],
+    [/^mlp/, 'MLP'],
+    [/^lstm/, 'LSTM'],
+  ];
+  const modelTitle = (version) => MODEL_TITLES.find(([re]) => re.test(version))?.[1] ?? version;
+
+  const renderLabKpis = () => {
+    const host = document.getElementById('lab-kpis');
+    if (!host) return;
+    const summaries = lab.summary?.summaries ?? [];
+    if (!summaries.length) {
+      host.innerHTML = '<p class="lab-note">Сводки нет — прогоните python -m ml infer.</p>';
+      return;
+    }
+    const naive = summaries.find((s) => /^naive-persist/.test(s.model_version));
+    const naiveMae = naive?.regression?.pred_requests?.['15']?.mae;
+    const bestF1 = Math.max(...summaries.map((s) => s.deficit?.['15']?.f1 ?? 0));
+    host.innerHTML = '';
+    for (const summary of summaries) {
+      const d = summary.deficit?.['15'] ?? {};
+      const f1 = d.f1 ?? 0;
+      const nn = !/^naive/.test(summary.model_version);
+      const color = f1 === bestF1 ? '#f5c518' : nn ? '#c9a227' : '#4a505a';
+      const mae = summary.regression?.pred_requests?.['15']?.mae;
+      const gain = nn && naiveMae && mae ? Math.round((1 - mae / naiveMae) * 100) : null;
+      const item = document.createElement('div');
+      item.className = 'ring-item';
+      item.innerHTML =
+        window.LabCharts.donut({
+          segments: [
+            { value: f1, color },
+            { value: 1 - f1, color: 'transparent' },
+          ],
+          center: f1.toFixed(2),
+          sub: 'F1',
+        }) +
+        `<div class="ring-title">${modelTitle(summary.model_version)}</div>` +
+        `<div class="ring-meta mono">P ${(d.precision ?? 0).toFixed(2)} · R ${(d.recall ?? 0).toFixed(2)}</div>` +
+        `<div class="ring-meta">${gain != null ? `ошибка спроса <b class="good">−${gain} %</b> к наиву` : 'наивный прогноз'}</div>`;
+      host.appendChild(item);
+    }
   };
 
   const renderCalibration = () => {
@@ -797,20 +915,51 @@
       series: [
         {
           name: 'идеал',
-          color: 'rgba(139, 152, 169, 0.7)',
+          color: 'rgba(138, 144, 156, 0.7)',
           dash: [4, 4],
           points: [
             { x: 0, y: 0 },
             { x: 1, y: 1 },
           ],
         },
-        { name: model.model_version, color: '#4cc9f0', points },
+        { name: model.model_version, color: '#5aa9e6', points },
       ],
       xIsTime: false,
     });
   };
 
+  // Строки графика «Факт vs прогноз» с учётом выбранного дня: неделя целиком
+  // (~2 тыс. точек) сливается в полосу, один день читается линиями.
+  const dayKey = (ts) => ts.slice(0, 10);
+  const visibleForecasts = () =>
+    lab.sel.day && lab.sel.day !== 'all' ? lab.forecasts.filter((row) => dayKey(row.ts) === lab.sel.day) : lab.forecasts;
+
+  const fillDaySelect = () => {
+    const select = document.getElementById('ml-day-select');
+    if (!select) return;
+    const days = [...new Set(lab.forecasts.map((row) => dayKey(row.ts)))];
+    const short = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    select.innerHTML = '<option value="all">вся неделя</option>';
+    for (const day of days) {
+      const [y, m, d] = day.split('-').map(Number);
+      const minute = (Date.UTC(y, m - 1, d) - world.simStartUTC) / 60000;
+      const option = document.createElement('option');
+      option.value = day;
+      option.textContent = `день ${Math.floor(minute / 1440) + 1} · ${short[(new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7]}`;
+      select.appendChild(option);
+    }
+    if (lab.sel.day == null || (lab.sel.day !== 'all' && !days.includes(lab.sel.day))) {
+      lab.sel.day = days[0] ?? 'all';
+    }
+    select.value = lab.sel.day;
+    select.onchange = () => {
+      lab.sel.day = select.value;
+      drawForecastChart();
+    };
+  };
+
   const drawForecastChart = () => {
+    const rowsShown = visibleForecasts();
     const target = lab.sel.target;
     const predKey = target === 'requests' ? 'pred_requests' : 'pred_free_drivers';
     const actKey = target === 'requests' ? 'actual_requests' : 'actual_free_drivers';
@@ -818,7 +967,7 @@
     // склеиваются в интервалы шириной окна (5 мин).
     const bands = [];
     let run = null;
-    for (const row of lab.forecasts) {
+    for (const row of rowsShown) {
       if (row.deficit_prob > DEFICIT_BAND_PROB) {
         const ms = isoToMs(row.ts);
         if (run) run.x1 = ms + BUCKET_MS;
@@ -830,21 +979,26 @@
         run = null;
       }
     }
-    const withFact = lab.forecasts.filter((row) => row[actKey] != null);
+    const withFact = rowsShown.filter((row) => row[actKey] != null);
+    // Факт — серая площадь на заднем плане, прогноз — яркая линия поверх.
     window.LabCharts.drawTimeSeries(labEls['forecast-chart'], {
       series: [
         {
-          name: 'прогноз',
-          color: '#4cc9f0',
-          points: lab.forecasts.map((row) => ({ x: isoToMs(row.ts), y: row[predKey] })),
+          name: 'факт',
+          color: 'rgba(201, 204, 209, 0.55)',
+          area: 'rgba(201, 204, 209, 0.16)',
+          width: 1,
+          points: withFact.map((row) => ({ x: isoToMs(row.ts), y: row[actKey] })),
         },
         {
-          name: 'факт',
-          color: '#ffd166',
-          points: withFact.map((row) => ({ x: isoToMs(row.ts), y: row[actKey] })),
+          name: 'прогноз',
+          color: '#f5c518',
+          width: 2,
+          points: rowsShown.map((row) => ({ x: isoToMs(row.ts), y: row[predKey] })),
         },
       ],
       bands,
+      legend: false,
     });
   };
 
@@ -855,7 +1009,7 @@
       series: [
         {
           name: 'остаток',
-          color: '#c792ea',
+          color: '#a48fd6',
           points: (errors.residuals || []).map((r) => ({ x: isoToMs(r.ts), y: r.residual })),
         },
       ],
@@ -876,7 +1030,7 @@
     window.LabCharts.drawValueBars(labEls['by-hour-chart'], {
       labels: byHour.map((_, hour) => String(hour).padStart(2, '0')),
       values: byHour,
-      color: '#7bd88f',
+      color: '#3fb57a',
     });
   };
 
@@ -906,6 +1060,7 @@
         fetch(`/api/ml/errors?${params}`),
       ]);
       lab.forecasts = (await forecastRes.json()).forecasts || [];
+      fillDaySelect();
       lab.errors = await errorsRes.json();
       drawForecastChart();
       drawErrors();
@@ -933,6 +1088,7 @@
       buildLabSelectors();
       renderModelPanel();
       renderSummaryTable();
+      renderLabKpis();
       renderCalibration();
       await loadForecastData();
       if (labNeedsRedraw) {
@@ -953,10 +1109,10 @@
   // перерисовывает график из уже загруженных данных.
 
   const BRANCH_COLORS = {
-    'a-base': '#8b98a9', // A — серый: база сравнения
-    'b-reactive': '#ffd166', // B — оранжевый
-    'c-mlp': '#4cc9f0', // C — голубой
-    'd-lstm': '#c792ea', // D — фиолетовый
+    'a-base': '#7d838c', // A — серый: база сравнения
+    'b-reactive': '#d99a3a', // B — янтарный
+    'c-mlp': '#6f9bd1', // C — голубой
+    'd-lstm': '#a48fd6', // D — фиолетовый
   };
 
   const OUTCOME_COLUMNS = [
@@ -1000,7 +1156,7 @@
     }
   };
 
-  const branchColor = (name) => BRANCH_COLORS[name] || '#8b98a9';
+  const branchColor = (name) => BRANCH_COLORS[name] || '#8a909c';
 
   const formatCompareValue = (column, value) => {
     if (value == null || !Number.isFinite(value)) return '—';
@@ -1185,12 +1341,65 @@
     renderCompareNote(compare.data);
   };
 
+  // Карточки миров: кольцо распределения тарифа (как часто и какой ступенью
+  // политика поднимала цену) и ключевые исходы недели.
+  const TARIFF_COLORS = [
+    [1.0, '#2a2f37', '×1.00'],
+    [1.15, '#7a6312', '×1.15'],
+    [1.3, '#c9a227', '×1.30'],
+    [1.5, '#f5c518', '×1.50'],
+  ];
+  const BRANCH_LETTERS = { 'a-base': 'A', 'b-reactive': 'B', 'c-mlp': 'C', 'd-lstm': 'D' };
+
+  const renderCompareCards = (data) => {
+    const host = document.getElementById('compare-cards');
+    if (!host) return;
+    host.innerHTML = '';
+    for (const branch of data.branches || []) {
+      const card = document.createElement('article');
+      card.className = 'world-card';
+      card.style.setProperty('--wc', branchColor(branch.name));
+      const mix = branch.tariff_mix || [];
+      const total = mix.reduce((sum, item) => sum + item.count, 0);
+      const raised = mix.filter((item) => Math.abs(item.mult - 1) > 1e-9).reduce((sum, item) => sum + item.count, 0);
+      const segments = mix.map((item) => ({
+        value: item.count,
+        color: TARIFF_COLORS.find(([m]) => Math.abs(m - item.mult) < 1e-6)?.[1] ?? '#a3a9b2',
+      }));
+      const used = TARIFF_COLORS.filter(([m]) => m !== 1.0 && mix.some((item) => Math.abs(item.mult - m) < 1e-6));
+      const o = branch.outcomes || {};
+      const delta = branch.delta || {};
+      const fmtDelta = (v) => (v == null ? '' : `<small class="${v <= 0 ? 'good' : 'bad'}">${v > 0 ? '+' : ''}${v.toFixed(1)} %</small>`);
+      const fmtRev = (v) => (v == null ? '' : `<small class="${v >= 0 ? 'good' : 'bad'}">${v > 0 ? '+' : ''}${v.toFixed(2)} %</small>`);
+      card.innerHTML = branch.exists
+        ? `<div class="wc-head"><span class="wc-letter">${BRANCH_LETTERS[branch.name] ?? '?'}</span><div><b>${branch.label}</b><span class="mono">${branch.name}</span></div></div>` +
+          `<div class="wc-ring">${window.LabCharts.donut({ segments, size: 128, thickness: 14, center: total ? `${((raised / total) * 100).toFixed(1)}%` : '—', sub: 'тариф ↑' })}` +
+          `<ul class="wc-mix">${
+            used.length
+              ? used.map(([m, color, label]) => {
+                  const count = mix.find((item) => Math.abs(item.mult - m) < 1e-6)?.count ?? 0;
+                  return `<li><i style="background:${color}"></i>${label}<span class="mono">${count}</span></li>`;
+                }).join('')
+              : '<li class="muted">тариф не менялся</li>'
+          }</ul></div>` +
+          `<dl class="wc-kpi">` +
+          `<div><dt>Доля дефицита</dt><dd class="mono">${o.deficit_share != null ? (o.deficit_share * 100).toFixed(1) + ' %' : '—'} ${fmtDelta(delta.deficit_share)}</dd></div>` +
+          `<div><dt>Ожидание, мин</dt><dd class="mono">${o.avg_wait_min != null ? o.avg_wait_min.toFixed(2) : '—'} ${fmtDelta(delta.avg_wait_min)}</dd></div>` +
+          `<div><dt>Поездки</dt><dd class="mono">${o.trips != null ? Math.round(o.trips).toLocaleString('ru-RU') : '—'}</dd></div>` +
+          `<div><dt>Выручка к A</dt><dd class="mono">${delta.revenue != null ? fmtRev(delta.revenue) : 'база'}</dd></div>` +
+          `</dl>`
+        : `<div class="wc-head"><span class="wc-letter">${BRANCH_LETTERS[branch.name] ?? '?'}</span><div><b>${branch.label}</b><span class="mono">${branch.name}</span></div></div><p class="lab-note">Мир не сгенерирован.</p>`;
+      host.appendChild(card);
+    }
+  };
+
   const renderCompare = () => {
     if (!compare.data) return;
     const branches = compare.data.branches || [];
     const hasAny = branches.some((branch) => branch.exists);
     showCompareEmpty(!hasAny);
     if (!hasAny) return;
+    renderCompareCards(compare.data);
     renderCompareOutcomes(compare.data);
     renderCompareLegend(compare.data);
     renderCompareAccuracy(compare.data.accuracy);
@@ -1213,11 +1422,18 @@
     }
   };
 
-  const initTabs = () => {    const buttons = document.querySelectorAll('#tab-bar .tab');
+  const initTabs = () => {
+    const buttons = document.querySelectorAll('#tab-bar .tab');
     for (const button of buttons) {
       button.addEventListener('click', () => {
         if (document.body.dataset.tab === button.dataset.tab) return;
         document.body.dataset.tab = button.dataset.tab;
+        // Вкладка — в хэше адреса: ссылка /#lab открывает сразу «Лабораторию».
+        try {
+          history.replaceState(null, '', button.dataset.tab === 'city' ? location.pathname : `#${button.dataset.tab}`);
+        } catch {
+          // file:// или песочница без History API — без хэша
+        }
         for (const other of buttons) other.classList.toggle('active', other === button);
         if (button.dataset.tab === 'lab') {
           if (lab.loaded) redrawLabCharts();
@@ -1246,8 +1462,12 @@
     world.lastFrame = nowMs;
     updateForecastColoring();
     renderPanel();
-    if (window.CityMap && world.cityReady) window.CityMap.draw(world, nowMs / 1000);
-    if (window.CityCharts) window.CityCharts.draw(world);
+    // Карта и график рисуются только на видимой вкладке «Город»: на других
+    // вкладках кадр ограничивается часами и панелью (экономия CPU).
+    if (document.body.dataset.tab === 'city') {
+      if (window.CityMap && world.cityReady) window.CityMap.draw(world, nowMs / 1000);
+      if (window.CityCharts) window.CityCharts.draw(world);
+    }
     requestAnimationFrame(frame);
   };
 
@@ -1259,7 +1479,6 @@
     els.weather = document.getElementById('weather');
     els.event = document.getElementById('event-badge');
     els.cars = document.getElementById('cars-count');
-    els.orders = document.getElementById('orders-count');
     els.play = document.getElementById('play-pause');
     els.worldSelect = document.getElementById('world-select');
     els.worldLabel = document.getElementById('world-label');
@@ -1282,14 +1501,26 @@
     });
 
     document.getElementById('play-pause').onclick = () => setPlaying(!world.playing);
-    document.getElementById('speed-select').onchange = (event) => setSpeed(Number(event.target.value));
+    els.speed = document.getElementById('speed-seg');
+    for (const button of els.speed.querySelectorAll('button')) {
+      button.onclick = () => setSpeed(Number(button.dataset.speed));
+    }
+    // Пробел — play/pause на вкладке «Город» (кроме фокуса в полях ввода).
+    document.addEventListener('keydown', (event) => {
+      if (event.code !== 'Space' || document.body.dataset.tab !== 'city') return;
+      if (event.target.closest('input, select, textarea, button')) return;
+      event.preventDefault();
+      setPlaying(!world.playing);
+    });
 
     // Реестр миров (change m6-worlds-ui): перечень из GET /api/worlds,
     // активный мир приходит в state.world, выбор — REST switch.
     await loadWorlds();
     els.worldSelect.onchange = (event) => switchWorld(event.target.value);
-    els.paintToggle.onclick = () =>
-      setPaintMode(world.paintMode === 'forecast' ? 'fact' : 'forecast');
+    els.paintToggle.onclick = (event) => {
+      const mode = event.target.closest('button')?.dataset.mode;
+      if (mode && mode !== world.paintMode) setPaintMode(mode);
+    };
 
     // Вкладка «Лаборатория»: кэш DOM и обработчики таб-бара; данные грузятся
     // лениво при первом открытии (design.md m3-ml-tab, решение 6).
@@ -1301,6 +1532,12 @@
 
     connect();
     requestAnimationFrame(frame);
+
+    // Стартовая вкладка из хэша адреса (#lab, #compare).
+    const startTab = location.hash.slice(1);
+    if (startTab === 'lab' || startTab === 'compare') {
+      document.querySelector(`#tab-bar .tab[data-tab="${startTab}"]`)?.click();
+    }
   };
 
   window.App = {
