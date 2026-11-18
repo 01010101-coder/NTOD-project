@@ -152,6 +152,21 @@ def _deficit_share(conn: sqlite3.Connection, window: CompareWindow) -> float | N
     return int(row[1] or 0) / total
 
 
+def _tariff_mix(conn: sqlite3.Connection, window: CompareWindow) -> list[dict]:
+    """Распределение зона-бакетов окна по тарифу (для кольцевой диаграммы UI).
+
+    Множитель округляется до сотых: ``[{"mult": 1.15, "count": 346}, ...]`` по
+    возрастанию тарифа. Показывает, какие ступени политики реально работали.
+    """
+
+    rows = conn.execute(
+        "SELECT ROUND(price_multiplier, 2) AS mult, COUNT(*) FROM zone_metrics_5min"
+        " WHERE ts >= ? AND ts < ? GROUP BY mult ORDER BY mult",
+        (to_iso(window.start), to_iso(window.end)),
+    ).fetchall()
+    return [{"mult": float(mult), "count": int(count)} for mult, count in rows]
+
+
 def _revenue_and_series(
     conn: sqlite3.Connection,
     cfg: AppConfig,
@@ -225,6 +240,7 @@ def branch_outcomes(
             "revenue": revenue,
             "deficit_share": _deficit_share(conn, window),
             "revenue_series": series,
+            "tariff_mix": _tariff_mix(conn, window),
         }
     except sqlite3.Error:
         return _empty_outcomes(hours)
@@ -381,6 +397,7 @@ def build_compare(cfg: AppConfig, worlds_dir: str | Path | None = None) -> dict:
                     "outcomes": dict.fromkeys(OUTCOME_KEYS),
                     "delta": dict.fromkeys(OUTCOME_KEYS),
                     "revenue_series": None,
+                    "tariff_mix": [],
                 }
             )
             continue
@@ -394,6 +411,7 @@ def build_compare(cfg: AppConfig, worlds_dir: str | Path | None = None) -> dict:
                 "outcomes": outcomes,
                 "delta": None,  # заполняется после сбора базы A
                 "revenue_series": raw["revenue_series"],
+                "tariff_mix": raw.get("tariff_mix", []),
             }
         )
         if info.name == BASE_BRANCH:

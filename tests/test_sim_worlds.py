@@ -25,6 +25,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import date
 from itertools import combinations
 from pathlib import Path
@@ -52,7 +53,8 @@ BOUNDARY_ISO = "2026-11-03 00:00:00"
 """Граница окна активации двухдневного мира с ``ml.train_days = 1`` (день 2)."""
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+# Интерпретатор текущего окружения: .venv/bin/python на POSIX, .venv/Scripts/python.exe на Windows.
+PYTHON = Path(sys.executable)
 
 
 def _ml_cfg() -> MlCfg:

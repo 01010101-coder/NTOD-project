@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -250,7 +251,8 @@ def test_generate_branch_unknown_branch_raises():
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+# Интерпретатор текущего окружения: .venv/bin/python на POSIX, .venv/Scripts/python.exe на Windows.
+PYTHON = Path(sys.executable)
 PROGRESS_PATTERN = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] trips=\d+ elapsed=\d+\.\d+s"
 
 
