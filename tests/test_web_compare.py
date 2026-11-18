@@ -438,6 +438,11 @@ def test_build_compare_deltas_and_order(tmp_path):
     assert len(a_base["revenue_series"]) == 24
     assert a_base["revenue_series"][-1] == pytest.approx(1000.0)
     assert c_mlp["revenue_series"][-1] == pytest.approx(1050.0)
+    # Распределение тарифов: у отсутствующей ветки пусто, у существующей — сумма = бакеты.
+    assert b_reactive["tariff_mix"] == []
+    assert all(item["count"] > 0 for item in a_base["tariff_mix"])
+    mults = [item["mult"] for item in c_mlp["tariff_mix"]]
+    assert mults == sorted(mults)
 
 
 def test_build_compare_without_base(tmp_path):
@@ -545,6 +550,7 @@ def test_api_compare_response(tmp_path):
         "outcomes",
         "delta",
         "revenue_series",
+        "tariff_mix",
     }
     assert by_name["c-mlp"]["delta"]["revenue"] == pytest.approx(5.0)
     assert by_name["b-reactive"]["exists"] is False

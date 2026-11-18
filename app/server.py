@@ -29,15 +29,17 @@ import asyncio
 import json
 import sqlite3
 import time
+from bisect import bisect_left
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.websockets import WebSocketState
 
 from app.compare import build_compare
 from app.paths import build_routes
@@ -304,6 +306,7 @@ class ReplayController:
         self.log = log
         self.meta = meta
         self.sim_start = sim_start
+        self.agg_step = 5  # шаг окон метрик; create_app ставит значение из конфига
         self.playhead = 0.0
         self.speed = 1.0
         self.playing = False
@@ -426,8 +429,43 @@ def state_payload(controller: ReplayController) -> dict:
     }
 
 
+def closed_window_deficit(controller: ReplayController, index: int) -> list[bool] | None:
+    """Дефицит по зонам последнего 5-минутного окна, закрытого к минуте ``index``.
+
+    Окно ``[b, b + step)`` закрыто, когда ``index ≥ b + step − 1`` — та же
+    граница, что у каймы клиента. Строки метрик упорядочены по ``ts``, поиск —
+    бисекцией. Окна ещё нет (первые минуты мира) — ``None``: клиент оставит
+    каймы пустыми до закрытия первого окна.
+    """
+
+    step = controller.agg_step
+    start = (index + 1) // step * step - step
+    if start < 0:
+        return None
+    ts = controller.sim_start + timedelta(minutes=start)
+    rows = controller.log.metrics_rows()
+    lo = bisect_left(rows, ts, key=lambda row: row["ts"])
+    window = []
+    for row in rows[lo:]:
+        if row["ts"] != ts:
+            break
+        window.append(row)
+    if not window:
+        return None
+    flags = [False] * (max(row["zone_id"] for row in window) + 1)
+    for row in window:
+        flags[row["zone_id"]] = bool(
+            deficit_label(row["requests"], row["free_drivers"], row["unfulfilled"])
+        )
+    return flags
+
+
 def snapshot_payload(controller: ReplayController) -> dict:
-    """Сообщение ``snapshot``: среда, активные поездки и ожидание минуты playhead."""
+    """Сообщение ``snapshot``: среда, активные поездки и ожидание минуты playhead.
+
+    ``env.deficit`` — дефицит зон последнего закрытого окна: карта сразу после
+    seek показывает каймы, не дожидаясь закрытия следующего окна.
+    """
 
     snap = snapshot_at(controller.log, controller.index)
     return {
@@ -438,6 +476,7 @@ def snapshot_payload(controller: ReplayController) -> dict:
             "is_rain": snap["is_rain"],
             "price_mult": snap["price_mult"],
             "free_by_zone": snap["free_by_zone"],
+            "deficit": closed_window_deficit(controller, snap["index"]),
         },
         "active_trips": [
             {
@@ -645,6 +684,7 @@ def create_app(
             "sim_start": cfg.engine.sim_start,
         }
         controller = ReplayController(log, meta, sim_start)
+        controller.agg_step = cfg.engine.agg_step_min
         fill = start_fill(log, cfg, seed=seed, days=days, branch=BRANCHES.get(name))
         return WorldState(name=name, label=label, log=log, controller=controller, fill=fill)
 
@@ -734,6 +774,46 @@ def create_app(
                 continue
             metrics.append({"ts": to_iso(row["ts"]), **{key: row[key] for key in keys}})
         return {"metrics": metrics}
+
+    @app.get("/api/deficit-timeline")
+    def api_deficit_timeline() -> dict:
+        """Лента дефицита активного мира для таймлайна «Города».
+
+        Компактная сводка вместо полных метрик: на каждое закрытое 5-минутное
+        окно — число зон в дефиците (правило контракта
+        :func:`ml.dataset.deficit_label`), заказы по городу и флаг дождя.
+        ``start`` — ISO начала первого окна,
+        ``counts[i]`` относится к окну ``start + i × step`` минут. Окна идут без
+        пропусков: агрегатор закрывает их подряд для всех зон.
+        """
+
+        counts: list[int] = []
+        requests: list[int] = []
+        rain: list[int] = []
+        start = None
+        index: dict[datetime, int] = {}
+        for row in app.state.replay.log.metrics_rows():
+            ts = row["ts"]
+            slot = index.get(ts)
+            if slot is None:
+                if start is None:
+                    start = ts
+                slot = len(counts)
+                index[ts] = slot
+                counts.append(0)
+                requests.append(0)
+                rain.append(1 if row["is_rain"] else 0)
+            requests[slot] += row["requests"]
+            if deficit_label(row["requests"], row["free_drivers"], row["unfulfilled"]):
+                counts[slot] += 1
+        return {
+            "start": to_iso(start) if start is not None else None,
+            "step": cfg.engine.agg_step_min,
+            "zones": len(cfg.city.zones),
+            "counts": counts,
+            "requests": requests,
+            "rain": rain,
+        }
 
     @app.get("/api/ml/models")
     def api_ml_models() -> dict:
@@ -1072,7 +1152,7 @@ def create_app(
 
         await websocket.accept()
         controller = app.state.replay
-        while controller.log.filled == 0 and not websocket.client_state.disconnected:
+        while controller.log.filled == 0 and websocket.client_state != WebSocketState.DISCONNECTED:
             controller = app.state.replay
             await asyncio.sleep(POLL_INTERVAL_SEC)
         session = ReplaySession(next_index=controller.index + 1)

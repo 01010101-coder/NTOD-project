@@ -147,7 +147,7 @@ policy:                         # ценовые политики (change m6-pol
     - {p_min: 0.40, mult: 1.15}
   total_cap: 2.0                # итог = тариф_мира × множитель, потолок суммарного тарифа
   reactive_mult: 1.30           # ветка B: дефицит сейчас → ×1.30
-  shift: {mlp: -0.453, lstm: -0.438}  # δ-калибровка частоты срабатываний
+  shift: {mlp: -0.719, lstm: -0.688}  # δ-калибровка частоты срабатываний
   target_fire_rate: 0.10        # цель: ступень активна в ~10 % зон-моментов
   worlds_dir: data/worlds       # реестр: a-base, b-reactive, c-mlp, d-lstm
   channel: price                # рычаг политики (change policy-driver-signal): price | heatmap | both

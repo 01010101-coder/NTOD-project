@@ -961,3 +961,19 @@ def test_planning_signal_contour_missing_artifact(tmp_path: Path) -> None:
         PlanningSignalContour(
             _signal_config(), LiveRowSource(), family="mlp", artifacts_root=tmp_path
         )
+
+
+def test_negative_shift_keeps_upper_stairs_reachable() -> None:
+    """Отрицательный δ растягивает шкалу, а не срезает верх: p = 1 → верхняя ступень.
+
+    Раньше ``p + δ`` при δ ≈ −0.44 упиралось в 0.56, и ступени ×1.3/×1.5 были
+    недостижимы. Растяжение сохраняет порядок вероятностей и порог первой ступени.
+    """
+
+    delta = -0.44
+    assert stair_multiplier(1.0, delta, DEFAULT_STAIRS) == 1.50
+    assert stair_multiplier(0.2, delta, DEFAULT_STAIRS) == 1.00
+    probs = [0.5, 0.7, 0.8, 0.95, 0.99]
+    mults = [stair_multiplier(p, delta, DEFAULT_STAIRS) for p in probs]
+    assert mults == sorted(mults)
+    assert {1.15, 1.30, 1.50} <= set(mults)

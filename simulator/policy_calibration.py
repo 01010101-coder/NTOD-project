@@ -73,6 +73,7 @@ from ml.planning import (
     planning_targets,
     predict_planning_windows,
 )
+from simulator.policy import effective_prob
 
 TOLERANCE = 0.01
 """Допуск частоты срабатываний: ±1 п.п. от цели (спека)."""
@@ -125,7 +126,7 @@ def fire_fraction(
 ) -> float:
     """Доля вероятностей со сработавшей любой ступенью при сдвиге ``delta``.
 
-    Срабатывание — ``p_eff = clip(p + delta, 0, 1) ≥ min(p_min)`` ступеней (любая
+    Срабатывание — ``effective_prob(p, delta) ≥ min(p_min)`` ступеней (любая
     ступень активна). Чистая функция, монотонная (неубывающая) по ``delta`` —
     основа бинарного поиска :func:`fit_delta`. Частота ступеней выражается
     аналитически по вероятностям — прогон мира на каждый δ не нужен (design
@@ -135,7 +136,7 @@ def fire_fraction(
     if len(probs) == 0:
         raise ValueError("нет вероятностей для расчёта доли срабатываний")
     p_min = min(stair.p_min for stair in stairs)
-    p_eff = np.clip(np.asarray(probs, dtype=float) + delta, 0.0, 1.0)
+    p_eff = effective_prob(np.asarray(probs, dtype=float), delta)
     return float(np.mean(p_eff >= p_min))
 
 

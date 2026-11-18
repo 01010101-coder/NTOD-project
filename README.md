@@ -70,6 +70,23 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
+### Windows без make
+
+Makefile рассчитан на `.venv/bin`. На Windows (PowerShell) те же шаги выглядят так:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m simulator --days 30 --seed 42          # make sim
+.venv\Scripts\python -m simulator --days 37 --db data/m3_epoch.db  # make epoch
+.venv\Scripts\python scripts/epoch_check.py                    # make epoch-check
+.venv\Scripts\python -m app                                    # make serve
+.venv\Scripts\python -m pytest                                 # make test
+```
+
+Остальные команды полного конвейера — те же, с `.venv\Scripts\python`
+вместо `.venv/bin/python`. Весь конвейер на CPU занимает около 7 минут.
+
 ## Быстрый старт: только карта города
 
 ```bash
